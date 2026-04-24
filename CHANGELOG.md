@@ -9,3 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Initial project scaffolding.
+
+### Known limitations
+- Comment fetching is capped at 100 per ticket (first page only). A WARN is logged on stderr when this limit is hit.

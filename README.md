@@ -146,7 +146,135 @@ All errors come back as the tool response (a string starting with `Error:`) rath
 - `Error: Jira authentication failed. ...` — wrong email/token
 - `Error: ticket(s) not found in Jira: PROJ-1234` — typo, deleted, or your token lacks access
 - `Error: Jira rate limit exceeded after retries. ...` — back off and retry
+- `Error: invalid max_depth parameter. ...` — `max_depth` was < 1
 - `Error: hierarchy cycle detected. ...` — parent link loop in Jira (shouldn't happen, but defensive)
+
+### From the shell (no MCP client needed)
+
+The tool is a plain async Python function — you can call it directly with `uv run` and get the exact same markdown that an LLM would receive. Useful for debugging, ad-hoc reading, piping into other tools, or scripting.
+
+All snippets below assume you're in the repo root and have `.env` filled in (or that `JIRA_*` env vars are exported). Output is whatever the tool returns — either the markdown render or an `Error: ...` line.
+
+**Fetch a single ticket (the common case):**
+
+```bash
+uv run python -c "
+import asyncio
+from jira_context_mcp.server import get_ticket_context
+print(asyncio.run(get_ticket_context(issue_key='PROJ-1234')))
+"
+```
+
+**Include comments:**
+
+```bash
+uv run python -c "
+import asyncio
+from jira_context_mcp.server import get_ticket_context
+print(asyncio.run(get_ticket_context(issue_key='PROJ-1234', include_comments=True)))
+"
+```
+
+**Narrow walk — only the ticket and its direct parent** (handy for sanity-checking parent links without pulling the whole chain):
+
+```bash
+uv run python -c "
+import asyncio
+from jira_context_mcp.server import get_ticket_context
+print(asyncio.run(get_ticket_context(issue_key='PROJ-1234', max_depth=2)))
+"
+```
+
+**Save the render to a file** for later reference or to paste into a PR description:
+
+```bash
+uv run python -c "
+import asyncio
+from jira_context_mcp.server import get_ticket_context
+print(asyncio.run(get_ticket_context(issue_key='PROJ-1234', include_comments=True)))
+" > PROJ-1234.md
+```
+
+**Pipe through a markdown pager** like [`glow`](https://github.com/charmbracelet/glow) for a rendered view in the terminal:
+
+```bash
+uv run python -c "
+import asyncio
+from jira_context_mcp.server import get_ticket_context
+print(asyncio.run(get_ticket_context(issue_key='PROJ-1234')))
+" | glow -
+```
+
+Or plain `less`:
+
+```bash
+uv run python -c "..." | less -R
+```
+
+**Ad-hoc credentials** (override `.env` for a single call, e.g. testing against a second instance):
+
+```bash
+JIRA_BASE_URL=https://other-org.atlassian.net \
+JIRA_EMAIL=you@example.com \
+JIRA_API_TOKEN=ATATT... \
+uv run python -c "
+import asyncio
+from jira_context_mcp.server import get_ticket_context
+print(asyncio.run(get_ticket_context(issue_key='OTHER-42')))
+"
+```
+
+**Batch several tickets** in one process (reuses the event loop, so it's faster than calling the script N times):
+
+```bash
+uv run python -c "
+import asyncio
+from jira_context_mcp.server import get_ticket_context
+
+async def main():
+    for key in ['PROJ-1234', 'PROJ-1235', 'PROJ-2000']:
+        print(await get_ticket_context(issue_key=key, include_comments=False))
+        print('---\n')
+
+asyncio.run(main())
+"
+```
+
+**Quick connectivity / auth check** — if creds are wrong you'll get `Error: Jira authentication failed ...`; if OK you'll get `Error: ticket(s) not found in Jira: DEFINITELY-BOGUS-9999`:
+
+```bash
+uv run python -c "
+import asyncio
+from jira_context_mcp.server import get_ticket_context
+print(asyncio.run(get_ticket_context(issue_key='DEFINITELY-BOGUS-9999')))
+"
+```
+
+**Extract just one section** from the output — e.g. grab only the entry ticket's Smart Checklist:
+
+```bash
+uv run python -c "
+import asyncio
+from jira_context_mcp.server import get_ticket_context
+print(asyncio.run(get_ticket_context(issue_key='PROJ-1234')))
+" | awk '/^## 🎯 /,0' | sed -n '/### Smart Checklist/,/^### /{/^### [^S]/q;p}'
+```
+
+**Shell alias** for the common case — add to `~/.zshrc` / `~/.bashrc`:
+
+```bash
+jctx() {
+  uv run --directory /absolute/path/to/jira-context-mcp python -c "
+import asyncio, sys
+from jira_context_mcp.server import get_ticket_context
+print(asyncio.run(get_ticket_context(issue_key=sys.argv[1], include_comments='$2' == '--comments')))
+" "$1" "$2"
+}
+
+# usage:
+#   jctx PROJ-1234
+#   jctx PROJ-1234 --comments
+```
 
 ## Known limitations
 
@@ -165,15 +293,7 @@ cp .env.example .env  # then edit
 uv run python -m jira_context_mcp  # stdio server — blocks waiting for MCP handshake
 ```
 
-Quick smoke test against the live Jira:
-
-```bash
-uv run python -c "
-import asyncio
-from jira_context_mcp.server import get_ticket_context
-print(asyncio.run(get_ticket_context(issue_key='PROJ-1234')))
-"
-```
+For ad-hoc tool calls without running the full MCP server, see [From the shell](#from-the-shell-no-mcp-client-needed) above.
 
 Project layout:
 

@@ -1,10 +1,15 @@
 """Render a :class:`TicketContext` into the markdown string returned by the MCP tool.
 
-The layout is top-down: a header with a path breadcrumb, meta-note about
-tool arguments, an optional truncation note, and then one section per node
-in root → entry order. The entry ticket is marked with a target emoji plus
-an ``ENTRY`` text marker (belt-and-braces — the emoji guides the eye on
-scroll, the text marker is unambiguous for LLMs that ignore emoji).
+The layout is top-down: a header with a path breadcrumb, a meta-note about
+tool arguments, an optional truncation note, an ASCII ``Issue tree`` showing
+the full hierarchy at a glance, and then one detail section per node in
+root → entry order. The entry ticket is marked with a target emoji plus an
+``ENTRY`` text marker (belt-and-braces — the emoji guides the eye on scroll,
+the text marker is unambiguous for LLMs that ignore emoji).
+
+Path nodes in the tree are additionally prefixed with ``→`` so readers can
+trace the walk visually; leaves (siblings of path nodes whose own children
+were not fetched) render without any marker.
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ def render_ticket_context(
             f"_(Note: hierarchy truncated at max_depth={max_depth}. "
             f"Root may have further ancestors.)_"
         )
+    sections.append(_render_tree(ctx))
     sections.append("---")
 
     for node in ctx.path:
@@ -76,7 +82,6 @@ def _render_node(node: TreeNode, *, include_comments: bool) -> str:
 
     lines.extend(["", "### Description", ticket.description_md or "_(no description)_"])
     lines.extend(["", *_render_checklist(node)])
-    lines.extend(["", *_render_children(node)])
 
     if include_comments:
         lines.extend(["", *_render_comments(node)])
@@ -96,23 +101,70 @@ def _render_checklist_item(item: ChecklistItem) -> str:
     return f"- {_STATUS_MARKER[item.status]} {item.name}"
 
 
-def _render_children(node: TreeNode) -> list[str]:
-    if node.ticket.parent_key is None:
-        return [
-            "### Children",
-            "_(not fetched — this is the root of the traversed hierarchy)_",
-        ]
+def _render_tree(ctx: TicketContext) -> str:
+    """Render an ASCII tree of the traversed hierarchy rooted at ``ctx.path[0]``.
 
-    children = node.children_of_parent
-    header = f"### Children ({len(children)})"
-    return [header, *(_render_child_line(t, self_key=node.ticket.key) for t in children)]
+    Path nodes are expanded (their children were fetched); their non-path
+    siblings render as leaves since their own children are unknown. The entry
+    ticket gets the 🎯 + ⬅️ ENTRY markers; other path nodes get a ``→``
+    prefix so readers can trace the walk without re-reading the breadcrumb.
+    """
+    path_keys = {node.ticket.key for node in ctx.path}
+
+    # parent_key -> list of children (preserves JQL order). A ticket's entry
+    # in this map exists only if we fetched its children — i.e. it is a
+    # non-entry path node. Entry is a leaf in the tree even if it has real
+    # subtasks in Jira, because we deliberately stop walking down.
+    parent_to_children: dict[str, list[Ticket]] = {}
+    for i in range(1, len(ctx.path)):
+        parent_key = ctx.path[i - 1].ticket.key
+        parent_to_children[parent_key] = list(ctx.path[i].children_of_parent)
+
+    root = ctx.path[0].ticket
+    # Root is already visually distinct as the top of the tree — no marker.
+    lines = [
+        "## Issue tree",
+        "",
+        "```",
+        f"{root.key} · [{root.issue_type}] {root.summary} · {root.status}",
+    ]
+    lines.extend(
+        _render_tree_children(root, "", parent_to_children, path_keys, ctx.entry_key)
+    )
+    lines.append("```")
+    return "\n".join(lines)
 
 
-def _render_child_line(ticket: Ticket, *, self_key: str) -> str:
-    body = f"{ticket.key} · [{ticket.issue_type}] {ticket.summary} · {ticket.status}"
-    if ticket.key == self_key:
-        return f"- **→ {body}**"
-    return f"- {body}"
+def _render_tree_children(
+    ticket: Ticket,
+    prefix: str,
+    parent_to_children: dict[str, list[Ticket]],
+    path_keys: set[str],
+    entry_key: str,
+) -> list[str]:
+    children = parent_to_children.get(ticket.key)
+    if not children:
+        return []
+    lines: list[str] = []
+    for i, child in enumerate(children):
+        is_last = i == len(children) - 1
+        branch = "└── " if is_last else "├── "
+        lines.append(prefix + branch + _format_tree_line(child, entry_key, path_keys))
+        sub_prefix = prefix + ("    " if is_last else "│   ")
+        lines.extend(
+            _render_tree_children(child, sub_prefix, parent_to_children, path_keys, entry_key)
+        )
+    return lines
+
+
+def _format_tree_line(ticket: Ticket, entry_key: str, path_keys: set[str]) -> str:
+    if ticket.key == entry_key:
+        marker, suffix = "🎯 ", " ⬅️ ENTRY"
+    elif ticket.key in path_keys:
+        marker, suffix = "→ ", ""
+    else:
+        marker, suffix = "", ""
+    return f"{marker}{ticket.key} · [{ticket.issue_type}] {ticket.summary} · {ticket.status}{suffix}"
 
 
 def _render_comments(node: TreeNode) -> list[str]:

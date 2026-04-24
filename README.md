@@ -15,6 +15,18 @@ Path: PROJ-100 → PROJ-240 → **PROJ-1234**
 
 _(Generated with: include_comments=False, max_depth=10)_
 
+## Issue tree
+
+```
+PROJ-100 · [Epic] Refactor billing module · In Progress
+├── PROJ-239 · [Story] Payment retry logic · Done
+├── → PROJ-240 · [Story] Extract invoice generation · In Progress
+│   ├── PROJ-1233 · [Task] Extract CSV export · In Progress
+│   ├── 🎯 PROJ-1234 · [Task] Add PDF template for invoices · In Progress ⬅️ ENTRY
+│   └── PROJ-1235 · [Task] Add XML export for invoices · To Do
+└── PROJ-260 · [Story] Email notifications · To Do
+```
+
 ---
 
 ## PROJ-100 · [Epic] Refactor billing module
@@ -28,9 +40,6 @@ Decompose the monolithic billing service into domain-aligned services.
 - [-] Migration plan drafted
 - [ ] Rollout communication to support
 
-### Children
-_(not fetched — this is the root of the traversed hierarchy)_
-
 ---
 
 ## PROJ-240 · [Story] Extract invoice generation
@@ -42,16 +51,13 @@ Pull invoice logic out of BillingService into a new InvoiceService.
 ### Smart Checklist
 _(no checklist)_
 
-### Children (3)
-- PROJ-239 · [Story] Payment retry logic · Done
-- **→ PROJ-240 · [Story] Extract invoice generation · In Progress**
-- PROJ-260 · [Story] Email notifications · To Do
-
 ---
 
 ## 🎯 PROJ-1234 · [Task] Add PDF template for invoices ⬅️ ENTRY
 ...
 ````
+
+The top-of-document `Issue tree` gives the full hierarchy at a glance — root at the top, path nodes prefixed with `→`, the entry ticket with 🎯 + `⬅️ ENTRY`, and all peers at each level shown in the order Jira returned them (approximately by rank). The per-ticket sections below carry the full description, Smart Checklist, and optionally comments.
 
 ## Prerequisites
 

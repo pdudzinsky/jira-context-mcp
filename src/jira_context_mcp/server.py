@@ -163,15 +163,17 @@ async def get_ticket_content(
     """
     error: str | None = None
     try:
-        async with JiraClient.from_settings(get_settings()) as client:
-            async with asyncio.TaskGroup() as tg:
-                ticket_task = tg.create_task(client.get_ticket(issue_key))
-                checklist_task = tg.create_task(client.get_checklist(issue_key))
-                comments_task = (
-                    tg.create_task(client.get_comments(issue_key))
-                    if include_comments
-                    else None
-                )
+        async with (
+            JiraClient.from_settings(get_settings()) as client,
+            asyncio.TaskGroup() as tg,
+        ):
+            ticket_task = tg.create_task(client.get_ticket(issue_key))
+            checklist_task = tg.create_task(client.get_checklist(issue_key))
+            comments_task = (
+                tg.create_task(client.get_comments(issue_key))
+                if include_comments
+                else None
+            )
         ticket = ticket_task.result()
         checklist = checklist_task.result()
         comments = comments_task.result() if comments_task else []

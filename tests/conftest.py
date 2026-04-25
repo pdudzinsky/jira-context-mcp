@@ -13,7 +13,6 @@ from jira_context_mcp.models import (
     Checklist,
     ChecklistItem,
     ChecklistSection,
-    Comment,
     Ticket,
     TreeNode,
 )
@@ -105,22 +104,18 @@ def utc_datetime():
 
 @pytest.fixture
 def make_tree_node():
-    """Factory for TreeNode instances with sane defaults."""
+    """Factory for recursive TreeNode instances with sane defaults."""
 
     def _make(
         ticket: Ticket,
         *,
-        checklist: Checklist | None = None,
-        comments: list[Comment] | None = None,
-        children_of_parent: list[Ticket] | None = None,
-        is_entry: bool = False,
+        children: list[TreeNode] | None = None,
+        is_focus: bool = False,
     ) -> TreeNode:
         return TreeNode(
             ticket=ticket,
-            checklist=checklist,
-            comments=comments or [],
-            children_of_parent=children_of_parent or [],
-            is_entry=is_entry,
+            children=children or [],
+            is_focus=is_focus,
         )
 
     return _make

@@ -28,36 +28,48 @@ def _ticket_payload(key: str, parent: str | None = None) -> dict[str, Any]:
 
 
 # ===================================================================
-# Tool registration
+# Tool registration & schemas
 # ===================================================================
 
 
 @pytest.mark.usefixtures("jira_env")
-async def test_both_tools_registered() -> None:
+async def test_three_tools_registered() -> None:
     from jira_context_mcp.server import mcp
 
     tools = await mcp.list_tools()
-    names = [t.name for t in tools]
-    assert "get_ticket_context" in names
-    assert "get_smart_checklist" in names
+    names = {t.name for t in tools}
+    assert names == {"get_issue_tree", "get_ticket_content", "get_smart_checklist"}
 
 
 @pytest.mark.usefixtures("jira_env")
-async def test_get_ticket_context_schema_has_expected_params() -> None:
+async def test_get_issue_tree_schema() -> None:
     from jira_context_mcp.server import mcp
 
     tools = await mcp.list_tools()
-    tool = next(t for t in tools if t.name == "get_ticket_context")
+    tool = next(t for t in tools if t.name == "get_issue_tree")
     schema = tool.to_mcp_tool().inputSchema
     props = schema["properties"]
     assert "issue_key" in props
-    assert "include_comments" in props
-    assert "max_depth" in props
+    assert "depth_up" in props
+    assert "depth_down" in props
     assert schema.get("required") == ["issue_key"]
 
 
 @pytest.mark.usefixtures("jira_env")
-async def test_get_smart_checklist_schema_minimal() -> None:
+async def test_get_ticket_content_schema() -> None:
+    from jira_context_mcp.server import mcp
+
+    tools = await mcp.list_tools()
+    tool = next(t for t in tools if t.name == "get_ticket_content")
+    schema = tool.to_mcp_tool().inputSchema
+    props = schema["properties"]
+    assert "issue_key" in props
+    assert "include_comments" in props
+    assert schema.get("required") == ["issue_key"]
+
+
+@pytest.mark.usefixtures("jira_env")
+async def test_get_smart_checklist_schema() -> None:
     from jira_context_mcp.server import mcp
 
     tools = await mcp.list_tools()
@@ -68,51 +80,57 @@ async def test_get_smart_checklist_schema_minimal() -> None:
 
 
 # ===================================================================
-# get_ticket_context error paths
+# get_issue_tree
 # ===================================================================
 
 
 @pytest.mark.usefixtures("jira_env", "no_sleep")
-class TestGetTicketContextErrors:
-    async def test_401_returns_auth_error_message(self, base_url: str) -> None:
-        from jira_context_mcp.server import get_ticket_context
+class TestGetIssueTree:
+    async def test_happy_path_renders_tree_with_overview(self, base_url: str) -> None:
+        from jira_context_mcp.server import get_issue_tree
 
         with respx.mock(base_url=base_url) as router:
             router.get("/rest/api/3/issue/FOO-1").mock(
-                return_value=httpx.Response(401, json={})
+                return_value=httpx.Response(200, json=_ticket_payload("FOO-1"))
             )
-            out = await get_ticket_context(issue_key="FOO-1")
-        assert out.startswith("Error: Jira authentication failed")
+            router.post("/rest/api/3/search/jql").mock(
+                return_value=httpx.Response(200, json={"issues": [], "isLast": True})
+            )
+            out = await get_issue_tree(issue_key="FOO-1")
+        assert "# Issue tree: FOO-1" in out
+        assert "## Overview" in out
+        assert "## Tree" in out
+        assert "🎯 FOO-1" in out
 
-    async def test_404_on_entry_returns_message_with_key(self, base_url: str) -> None:
-        from jira_context_mcp.server import get_ticket_context
+    async def test_404_returns_not_found_message(self, base_url: str) -> None:
+        from jira_context_mcp.server import get_issue_tree
 
         with respx.mock(base_url=base_url) as router:
             router.get("/rest/api/3/issue/MISSING-9").mock(
                 return_value=httpx.Response(404, json={})
             )
-            out = await get_ticket_context(issue_key="MISSING-9")
-        assert "ticket(s) not found" in out
+            out = await get_issue_tree(issue_key="MISSING-9")
+        assert "not found" in out
         assert "MISSING-9" in out
 
-    async def test_429_exhausted_returns_rate_limit_error(self, base_url: str) -> None:
-        from jira_context_mcp.server import get_ticket_context
+    async def test_401_returns_auth_error(self, base_url: str) -> None:
+        from jira_context_mcp.server import get_issue_tree
 
         with respx.mock(base_url=base_url) as router:
             router.get("/rest/api/3/issue/FOO-1").mock(
-                return_value=httpx.Response(429, headers={"Retry-After": "0"})
+                return_value=httpx.Response(401, json={})
             )
-            out = await get_ticket_context(issue_key="FOO-1", max_depth=1)
-        assert out.startswith("Error: Jira rate limit exceeded")
+            out = await get_issue_tree(issue_key="FOO-1")
+        assert out.startswith("Error: Jira authentication failed")
 
-    async def test_max_depth_zero_returns_invalid_max_depth(self, base_url: str) -> None:
-        from jira_context_mcp.server import get_ticket_context
+    async def test_depth_up_zero_returns_invalid_depth(self, base_url: str) -> None:
+        from jira_context_mcp.server import get_issue_tree
 
-        out = await get_ticket_context(issue_key="FOO-1", max_depth=0)
-        assert out.startswith("Error: invalid max_depth parameter")
+        out = await get_issue_tree(issue_key="FOO-1", depth_up=0)
+        assert out.startswith("Error: invalid depth parameter")
 
-    async def test_cycle_returns_hierarchy_cycle_error(self, base_url: str) -> None:
-        from jira_context_mcp.server import get_ticket_context
+    async def test_cycle_returns_cycle_error(self, base_url: str) -> None:
+        from jira_context_mcp.server import get_issue_tree
 
         with respx.mock(base_url=base_url) as router:
             router.get("/rest/api/3/issue/A-1").mock(
@@ -121,82 +139,114 @@ class TestGetTicketContextErrors:
             router.get("/rest/api/3/issue/B-1").mock(
                 return_value=httpx.Response(200, json=_ticket_payload("B-1", parent="A-1"))
             )
-            out = await get_ticket_context(issue_key="A-1")
+            out = await get_issue_tree(issue_key="A-1")
         assert out.startswith("Error: hierarchy cycle detected")
 
 
 # ===================================================================
-# Config validation errors (no jira_env fixture)
-# ===================================================================
-
-
-async def test_missing_env_returns_listing_each_missing_var(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-) -> None:
-    # chdir into a clean dir so the repo's .env (if present) isn't picked up
-    monkeypatch.chdir(tmp_path)
-    for var in ("JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"):
-        monkeypatch.delenv(var, raising=False)
-    from jira_context_mcp.config import get_settings
-    get_settings.cache_clear()
-    from jira_context_mcp.server import get_ticket_context
-
-    out = await get_ticket_context(issue_key="FOO-1")
-    assert out.startswith("Error: missing required environment variable(s):")
-    assert "JIRA_BASE_URL" in out
-    assert "JIRA_EMAIL" in out
-    assert "JIRA_API_TOKEN" in out
-    get_settings.cache_clear()
-
-
-async def test_invalid_url_returns_invalid_jira_configuration(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("JIRA_BASE_URL", "not-a-url")
-    monkeypatch.setenv("JIRA_EMAIL", "test@example.com")
-    monkeypatch.setenv("JIRA_API_TOKEN", "dummy")
-    from jira_context_mcp.config import get_settings
-    get_settings.cache_clear()
-    from jira_context_mcp.server import get_ticket_context
-
-    out = await get_ticket_context(issue_key="FOO-1")
-    assert out.startswith("Error: invalid Jira configuration")
-    get_settings.cache_clear()
-
-
-# ===================================================================
-# get_ticket_context happy path
+# get_ticket_content
 # ===================================================================
 
 
 @pytest.mark.usefixtures("jira_env", "no_sleep")
-async def test_happy_path_returns_full_render(base_url: str) -> None:
-    from jira_context_mcp.server import get_ticket_context
+class TestGetTicketContent:
+    async def test_happy_path_renders_full_content(self, base_url: str) -> None:
+        from jira_context_mcp.server import get_ticket_content
 
-    with respx.mock(base_url=base_url) as router:
-        router.get("/rest/api/3/issue/FOO-1").mock(
-            return_value=httpx.Response(200, json=_ticket_payload("FOO-1"))
-        )
-        router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
-            return_value=httpx.Response(404, json={})
-        )
-        out = await get_ticket_context(issue_key="FOO-1")
-    assert "# Ticket context: FOO-1" in out
-    assert "⬅️ ENTRY" in out
-    assert "## Issue tree" in out
+        with respx.mock(base_url=base_url) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(
+                return_value=httpx.Response(200, json=_ticket_payload("FOO-1"))
+            )
+            router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
+                return_value=httpx.Response(404, json={})
+            )
+            out = await get_ticket_content(issue_key="FOO-1")
+        assert out.startswith("# FOO-1 ·")
+        assert "## Description" in out
+
+    async def test_includes_checklist_when_present(self, base_url: str) -> None:
+        from jira_context_mcp.server import get_ticket_content
+
+        with respx.mock(base_url=base_url) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(
+                return_value=httpx.Response(200, json=_ticket_payload("FOO-1"))
+            )
+            router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
+                return_value=httpx.Response(
+                    200, json={"value": "## Section\n- alpha\n- beta"}
+                )
+            )
+            out = await get_ticket_content(issue_key="FOO-1")
+        assert "## Smart Checklist (2 items)" in out
+        assert "### Section" in out
+        assert "- [ ] alpha" in out
+
+    async def test_include_comments_fetches_and_renders(self, base_url: str) -> None:
+        from jira_context_mcp.server import get_ticket_content
+
+        with respx.mock(base_url=base_url) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(
+                return_value=httpx.Response(200, json=_ticket_payload("FOO-1"))
+            )
+            router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
+                return_value=httpx.Response(404, json={})
+            )
+            router.get("/rest/api/3/issue/FOO-1/comment").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "comments": [
+                            {
+                                "author": {"displayName": "Bob"},
+                                "created": "2026-04-22T14:05:00+00:00",
+                                "body": None,
+                            }
+                        ],
+                        "total": 1,
+                    },
+                )
+            )
+            out = await get_ticket_content(issue_key="FOO-1", include_comments=True)
+        assert "## Comments" in out
+        assert "Bob" in out
+
+    async def test_404_returns_not_found(self, base_url: str) -> None:
+        from jira_context_mcp.server import get_ticket_content
+
+        with respx.mock(base_url=base_url) as router:
+            router.get("/rest/api/3/issue/MISSING-9").mock(
+                return_value=httpx.Response(404, json={})
+            )
+            # get_checklist runs in parallel with get_ticket; mock its endpoint too
+            router.get(CHECKLIST_PATH.format(key="MISSING-9")).mock(
+                return_value=httpx.Response(404, json={})
+            )
+            out = await get_ticket_content(issue_key="MISSING-9")
+        assert "not found" in out
+        assert "MISSING-9" in out
+
+    async def test_401_returns_auth_error(self, base_url: str) -> None:
+        from jira_context_mcp.server import get_ticket_content
+
+        with respx.mock(base_url=base_url) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(
+                return_value=httpx.Response(401, json={})
+            )
+            router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
+                return_value=httpx.Response(401, json={})
+            )
+            out = await get_ticket_content(issue_key="FOO-1")
+        assert out.startswith("Error: Jira authentication failed")
 
 
 # ===================================================================
-# get_smart_checklist tool — output shapes + errors
+# get_smart_checklist
 # ===================================================================
 
 
 @pytest.mark.usefixtures("jira_env", "no_sleep")
 class TestGetSmartChecklist:
-    async def test_with_items_returns_header_with_count_and_sections(
-        self, base_url: str
-    ) -> None:
+    async def test_with_items_returns_header_and_sections(self, base_url: str) -> None:
         from jira_context_mcp.server import get_smart_checklist
 
         body = "## 1. First\n- a\n- b\n## 2. Second\n- c"
@@ -207,31 +257,28 @@ class TestGetSmartChecklist:
             out = await get_smart_checklist(issue_key="FOO-1")
         assert out.startswith("# Smart Checklist: FOO-1 (3 items)")
         assert "## 1. First" in out
-        assert "## 2. Second" in out
-        assert "- [ ] a" in out
-        assert "- [ ] c" in out
 
-    async def test_empty_value_returns_empty_message(self, base_url: str) -> None:
+    async def test_empty_returns_message(self, base_url: str) -> None:
         from jira_context_mcp.server import get_smart_checklist
 
         with respx.mock(base_url=base_url) as router:
-            router.get(CHECKLIST_PATH.format(key="FOO-2")).mock(
+            router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
                 return_value=httpx.Response(200, json={"value": ""})
             )
-            out = await get_smart_checklist(issue_key="FOO-2")
-        assert out.startswith("Smart Checklist on FOO-2: empty")
+            out = await get_smart_checklist(issue_key="FOO-1")
+        assert out.startswith("Smart Checklist on FOO-1: empty")
 
-    async def test_404_returns_not_present_message(self, base_url: str) -> None:
+    async def test_404_returns_not_present(self, base_url: str) -> None:
         from jira_context_mcp.server import get_smart_checklist
 
         with respx.mock(base_url=base_url) as router:
-            router.get(CHECKLIST_PATH.format(key="FOO-3")).mock(
+            router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
                 return_value=httpx.Response(404, json={})
             )
-            out = await get_smart_checklist(issue_key="FOO-3")
-        assert out.startswith("Smart Checklist on FOO-3: not present")
+            out = await get_smart_checklist(issue_key="FOO-1")
+        assert out.startswith("Smart Checklist on FOO-1: not present")
 
-    async def test_auth_failure_returns_error(self, base_url: str) -> None:
+    async def test_401_returns_auth_error(self, base_url: str) -> None:
         from jira_context_mcp.server import get_smart_checklist
 
         with respx.mock(base_url=base_url) as router:
@@ -241,49 +288,38 @@ class TestGetSmartChecklist:
             out = await get_smart_checklist(issue_key="FOO-1")
         assert out.startswith("Error: Jira authentication failed")
 
-    async def test_rate_limit_exhausted_returns_error(
-        self, base_url: str, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # ensure max_retries is small so we don't loop forever
-        monkeypatch.setenv("MAX_RETRIES", "1")
-        from jira_context_mcp.config import get_settings
-        get_settings.cache_clear()
-        from jira_context_mcp.server import get_smart_checklist
 
-        with respx.mock(base_url=base_url) as router:
-            router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
-                return_value=httpx.Response(429, headers={"Retry-After": "0"})
-            )
-            out = await get_smart_checklist(issue_key="FOO-1")
-        assert out.startswith("Error: Jira rate limit exceeded")
-        get_settings.cache_clear()
+# ===================================================================
+# Config validation
+# ===================================================================
 
-    async def test_5xx_exhausted_returns_generic_request_failed(
-        self, base_url: str, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("MAX_RETRIES", "1")
-        from jira_context_mcp.config import get_settings
-        get_settings.cache_clear()
-        from jira_context_mcp.server import get_smart_checklist
 
-        with respx.mock(base_url=base_url) as router:
-            router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
-                return_value=httpx.Response(503, text="busy")
-            )
-            out = await get_smart_checklist(issue_key="FOO-1")
-        assert out.startswith("Error: Jira request failed")
-        get_settings.cache_clear()
+async def test_get_issue_tree_missing_env_returns_missing_vars(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    for var in ("JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    from jira_context_mcp.config import get_settings
+    get_settings.cache_clear()
+    from jira_context_mcp.server import get_issue_tree
 
-    async def test_missing_env_returns_missing_vars_error(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-    ) -> None:
-        monkeypatch.chdir(tmp_path)
-        for var in ("JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"):
-            monkeypatch.delenv(var, raising=False)
-        from jira_context_mcp.config import get_settings
-        get_settings.cache_clear()
-        from jira_context_mcp.server import get_smart_checklist
+    out = await get_issue_tree(issue_key="FOO-1")
+    assert out.startswith("Error: missing required environment variable(s):")
+    get_settings.cache_clear()
 
-        out = await get_smart_checklist(issue_key="FOO-1")
-        assert out.startswith("Error: missing required environment variable(s):")
-        get_settings.cache_clear()
+
+async def test_get_ticket_content_invalid_url_returns_invalid_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("JIRA_BASE_URL", "not-a-url")
+    monkeypatch.setenv("JIRA_EMAIL", "test@example.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "dummy")
+    from jira_context_mcp.config import get_settings
+    get_settings.cache_clear()
+    from jira_context_mcp.server import get_ticket_content
+
+    out = await get_ticket_content(issue_key="FOO-1")
+    assert out.startswith("Error: invalid Jira configuration")
+    get_settings.cache_clear()

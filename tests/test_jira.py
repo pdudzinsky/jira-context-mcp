@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
 from typing import Any
 
 import httpx
@@ -17,7 +16,6 @@ from jira_context_mcp.jira import (
     JiraNotFoundError,
     JiraRateLimitError,
 )
-
 
 CHECKLIST_PROPERTY_PATH = (
     "/rest/api/3/issue/{key}/properties/com.railsware.SmartChecklist.checklist"
@@ -46,8 +44,8 @@ def _ticket_payload(key: str, *, parent: str | None = None, **fields: Any) -> di
         "summary": fields.get("summary", f"summary {key}"),
         "status": {"name": fields.get("status", "Open")},
         "issuetype": {"name": fields.get("issuetype", "Story")},
-        "assignee": fields.get("assignee", None),
-        "description": fields.get("description", None),
+        "assignee": fields.get("assignee"),
+        "description": fields.get("description"),
         "parent": {"key": parent} if parent else None,
     }
     return {"key": key, "fields": f}

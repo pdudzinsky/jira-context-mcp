@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable
 
-import pytest
-
+from jira_context_mcp.markdown import (
+    render_checklist,
+    render_checklist_items,
+    render_ticket_context,
+)
 from jira_context_mcp.models import (
     Checklist,
     ChecklistItem,
@@ -16,11 +18,6 @@ from jira_context_mcp.models import (
     Ticket,
     TicketContext,
     TreeNode,
-)
-from jira_context_mcp.markdown import (
-    render_checklist,
-    render_checklist_items,
-    render_ticket_context,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "expected"
@@ -245,7 +242,7 @@ def test_tree_preserves_jql_response_order() -> None:
     ctx = _ctx_3level_with_checklist()
     out = render_ticket_context(ctx, include_comments=False, max_depth=10)
     tree_block = out.split("```")[1]
-    mid_lines = [l for l in tree_block.splitlines() if " MID-" in l]
+    mid_lines = [line for line in tree_block.splitlines() if " MID-" in line]
     # Order in our fixture: MID-2, MID-1 (path), MID-3
     assert mid_lines[0].strip().endswith("Middle peer A · Done")
     assert "→ MID-1" in mid_lines[1]
@@ -257,7 +254,7 @@ def test_tree_non_path_siblings_render_as_leaves() -> None:
     out = render_ticket_context(ctx, include_comments=False, max_depth=10)
     tree_block = out.split("```")[1]
     # MID-2 is a non-path sibling; should not have a → or 🎯 marker
-    mid2_line = next(l for l in tree_block.splitlines() if "MID-2" in l)
+    mid2_line = next(line for line in tree_block.splitlines() if "MID-2" in line)
     assert "→" not in mid2_line
     assert "🎯" not in mid2_line
 
@@ -276,7 +273,12 @@ def test_render_checklist_count_shows_total_when_all_open(
     sample_ticket: Ticket,
 ) -> None:
     cl = Checklist(
-        sections=[ChecklistSection(title=None, items=[ChecklistItem(name="x"), ChecklistItem(name="y")])]
+        sections=[
+            ChecklistSection(
+                title=None,
+                items=[ChecklistItem(name="x"), ChecklistItem(name="y")],
+            )
+        ]
     )
     n = node(sample_ticket, checklist=cl, is_entry=True)
     ctx = TicketContext(path=[n], entry_key=sample_ticket.key)
@@ -315,7 +317,7 @@ def test_no_checklist_section_when_checklist_is_empty(sample_ticket: Ticket) -> 
 
 def test_comments_section_absent_when_include_comments_false(sample_ticket: Ticket) -> None:
     c = Comment(
-        author="A", created=datetime(2026, 1, 1, tzinfo=timezone.utc), body_md="x"
+        author="A", created=datetime(2026, 1, 1, tzinfo=UTC), body_md="x"
     )
     n = node(sample_ticket, comments=[c], is_entry=True)
     ctx = TicketContext(path=[n], entry_key=sample_ticket.key)
@@ -338,7 +340,7 @@ def test_comments_render_with_date_author_and_blockquoted_body(
 ) -> None:
     c = Comment(
         author="Bob",
-        created=datetime(2026, 4, 22, 14, 5, tzinfo=timezone.utc),
+        created=datetime(2026, 4, 22, 14, 5, tzinfo=UTC),
         body_md="line 1\n\nline 2",
     )
     n = node(sample_ticket, comments=[c], is_entry=True)

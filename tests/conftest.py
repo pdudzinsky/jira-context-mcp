@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -98,7 +98,7 @@ def utc_datetime():
     """Factory for tz-aware datetimes used by Comment fixtures."""
 
     def _make(year: int, month: int, day: int, hour: int = 0, minute: int = 0) -> datetime:
-        return datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+        return datetime(year, month, day, hour, minute, tzinfo=UTC)
 
     return _make
 

@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from jira_context_mcp.context import build_ticket_context
-from jira_context_mcp.jira import JiraClient, JiraNotFoundError
+from jira_context_mcp.jira import JiraNotFoundError
 from jira_context_mcp.models import Checklist, Comment, Ticket
 
 
@@ -49,7 +49,7 @@ class FakeClient:
         self.get_comments_calls: list[str] = []
         self.get_children_calls: list[Sequence[str]] = []
 
-    async def __aenter__(self) -> "FakeClient":
+    async def __aenter__(self) -> FakeClient:
         return self
 
     async def __aexit__(self, *_: Any) -> None:

@@ -218,7 +218,10 @@ def _format_tree_line(ticket: Ticket, entry_key: str, path_keys: set[str]) -> st
         marker, suffix = "→ ", ""
     else:
         marker, suffix = "", ""
-    return f"{marker}{ticket.key} · [{ticket.issue_type}] {ticket.summary} · {ticket.status}{suffix}"
+    return (
+        f"{marker}{ticket.key} · [{ticket.issue_type}] {ticket.summary} "
+        f"· {ticket.status}{suffix}"
+    )
 
 
 def _render_comments(node: TreeNode) -> list[str]:

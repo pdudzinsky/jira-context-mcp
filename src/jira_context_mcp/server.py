@@ -82,7 +82,12 @@ async def get_ticket_context(
             f"Check JIRA_EMAIL and JIRA_API_TOKEN. ({msgs})"
         )
     except* JiraNotFoundError as eg:
-        keys = sorted({e.key for e in eg.exceptions if e.key})
+        # eg.exceptions can in principle contain nested ExceptionGroups when
+        # multiple tasks raise in the orchestrator's TaskGroup; isinstance
+        # narrows the type for mypy and skips groups (which don't carry a key).
+        keys = sorted(
+            {e.key for e in eg.exceptions if isinstance(e, JiraNotFoundError) and e.key}
+        )
         if keys:
             error = f"Error: ticket(s) not found in Jira: {', '.join(keys)}"
         else:

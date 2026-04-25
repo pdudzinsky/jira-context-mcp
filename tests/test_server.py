@@ -8,7 +8,6 @@ import httpx
 import pytest
 import respx
 
-
 CHECKLIST_PATH = (
     "/rest/api/3/issue/{key}/properties/com.railsware.SmartChecklist.checklist"
 )

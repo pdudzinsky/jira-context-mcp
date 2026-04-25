@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 
 import pytest
 from pydantic import ValidationError
@@ -16,7 +16,6 @@ from jira_context_mcp.models import (
     TicketContext,
     TreeNode,
 )
-
 
 # ---------- construction ----------
 
@@ -66,7 +65,7 @@ def test_checklist_with_no_sections_has_empty_items() -> None:
 def test_comment_with_tz_aware_created_constructs() -> None:
     c = Comment(
         author="bob",
-        created=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        created=datetime(2026, 1, 1, tzinfo=UTC),
         body_md="body",
     )
     assert c.author == "bob"

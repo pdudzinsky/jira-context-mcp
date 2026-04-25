@@ -165,8 +165,15 @@ async def get_smart_checklist(issue_key: str) -> str:
                 f"Smart Checklist on {issue_key}: empty "
                 "(plugin active but no items recorded)."
             )
+        total = len(checklist.items)
+        done = sum(1 for item in checklist.items if item.status == "done")
+        count = (
+            f"{total} item{'s' if total != 1 else ''}"
+            if done == 0
+            else f"{done}/{total} done"
+        )
         return (
-            f"# Smart Checklist: {issue_key}\n\n"
+            f"# Smart Checklist: {issue_key} ({count})\n\n"
             f"{render_checklist(checklist, heading_level=2)}\n"
         )
     except* JiraAuthError as eg:

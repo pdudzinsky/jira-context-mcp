@@ -134,7 +134,25 @@ def _render_checklist(node: TreeNode) -> list[str]:
         return []
     # heading_level=4 keeps section headers (#### ...) one level below the
     # node's own ### Smart Checklist heading, preserving markdown hierarchy.
-    return ["### Smart Checklist", render_checklist(node.checklist, heading_level=4)]
+    count = _format_item_count(node.checklist.items)
+    return [
+        f"### Smart Checklist ({count})",
+        render_checklist(node.checklist, heading_level=4),
+    ]
+
+
+def _format_item_count(items: list[ChecklistItem]) -> str:
+    """Render the count summary used in Smart Checklist headers.
+
+    Falls back to the total count when every item is open (the common case
+    for the modern bullet-list format where statuses live in sibling Jira
+    properties); otherwise reports done-vs-total so the reader sees progress.
+    """
+    total = len(items)
+    done = sum(1 for item in items if item.status == "done")
+    if done == 0:
+        return f"{total} item{'s' if total != 1 else ''}"
+    return f"{done}/{total} done"
 
 
 def _render_tree(ctx: TicketContext) -> str:

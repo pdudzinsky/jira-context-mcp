@@ -67,7 +67,16 @@ _JQL_FIELDS: Final = ["summary", "status", "issuetype", "assignee", "parent"]
 _BACKOFF_BASE_SECONDS: Final = 1.0
 _BACKOFF_MAX_SECONDS: Final = 30.0
 
-_CHECKLIST_ITEM_RE: Final = re.compile(r"^\s*\[(.)\]\s+(.+?)\s*$")
+# Legacy task-list form: optional bullet, then [<marker>] <name>
+# (status carried inline via the marker character).
+_CHECKLIST_TASK_RE: Final = re.compile(r"^\s*[-*]?\s*\[(.)\]\s+(.+?)\s*$")
+# Modern Smart Checklist v3 form: plain bullet item with no inline status —
+# statuses live in a sibling property (``SmartChecklist`` aggregate /
+# ``ItemStatusSearchMeta`` per-item hashes), so every parsed item defaults
+# to ``"open"`` here. Section headers ("# ...") are skipped silently.
+_CHECKLIST_BULLET_RE: Final = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
+_HEADER_RE: Final = re.compile(r"^\s*#")
+
 _STATUS_MAP: Final[dict[str, ChecklistStatus]] = {
     " ": "open",
     "x": "done",
@@ -80,29 +89,53 @@ _STATUS_MAP: Final[dict[str, ChecklistStatus]] = {
 def parse_checklist_markdown(raw: str) -> list[ChecklistItem]:
     """Parse a Smart Checklist markdown blob into a flat item list.
 
-    Section headers, blank lines, and any text outside the ``[<marker>] <name>``
-    shape are silently skipped. Lines with an unrecognized marker are kept
-    with ``status`` coerced to ``"open"`` and a warning written to stderr so
-    upstream changes to the plugin's status set are noticed quickly.
+    Handles two formats:
+
+    1. **Modern (Smart Checklist v3+)** — plain bullet items ``- text``,
+       grouped under ``## section`` headers. Items default to status
+       ``"open"`` because per-item status lives in sibling Jira properties
+       (``SmartChecklist`` aggregate flags, ``ItemStatusSearchMeta`` hashes).
+    2. **Legacy task-list** — ``[ ] text`` / ``[x] text`` / ``[-] text`` /
+       ``[~] text`` with the status carried inline. Recognised for
+       backward compatibility with older instances and ad-hoc fixtures.
+
+    Section headers, blank lines, and any text outside both shapes are
+    silently skipped. Lines with an unrecognised legacy marker are kept
+    with status coerced to ``"open"`` and a warning emitted.
     """
     items: list[ChecklistItem] = []
     for line in raw.splitlines():
-        match = _CHECKLIST_ITEM_RE.match(line)
-        if not match:
+        if not line.strip():
             continue
-        marker = match.group(1)
-        name = match.group(2).strip()
-        if not name:
+        if _HEADER_RE.match(line):
             continue
-        status = _STATUS_MAP.get(marker)
-        if status is None:
-            logger.warning(
-                "unknown Smart Checklist status marker [%s] in line: %r",
-                marker,
-                line,
-            )
-            status = "open"
-        items.append(ChecklistItem(name=name, status=status))
+
+        # Try the legacy task-list form first — it's the more specific shape
+        # ("- [ ] x" must not be parsed as a bare bullet of "[ ] x").
+        task = _CHECKLIST_TASK_RE.match(line)
+        if task:
+            marker = task.group(1)
+            name = task.group(2).strip()
+            if not name:
+                continue
+            status = _STATUS_MAP.get(marker)
+            if status is None:
+                logger.warning(
+                    "unknown Smart Checklist status marker [%s] in line: %r",
+                    marker,
+                    line,
+                )
+                status = "open"
+            items.append(ChecklistItem(name=name, status=status))
+            continue
+
+        bullet = _CHECKLIST_BULLET_RE.match(line)
+        if bullet:
+            name = bullet.group(1).strip()
+            if not name:
+                continue
+            items.append(ChecklistItem(name=name, status="open"))
+            continue
     return items
 
 

@@ -2,12 +2,14 @@
 
 Minimal walker that handles the node types commonly used in Jira issue
 descriptions and comments: ``paragraph``, ``heading``, ``bulletList``,
-``orderedList``, ``listItem``, ``codeBlock``, ``blockquote``, ``text``
-(with ``strong``, ``em``, ``code``, ``strike``, ``link`` marks),
-``hardBreak``, ``mention``, and ``emoji``. Unknown block or inline nodes are
-preserved as ``[unsupported: <type>]`` markers so that missing content is
-visible rather than silently dropped; unknown marks are silently ignored
-(the underlying text is still rendered).
+``orderedList``, ``listItem``, ``codeBlock``, ``blockquote``, ``rule``,
+``text`` (with ``strong``, ``em``, ``code``, ``strike``, ``link`` marks),
+``hardBreak``, ``mention``, ``emoji``, ``inlineCard``, and ``mediaSingle`` /
+``mediaGroup`` / ``media`` / ``mediaInline`` (rendered as ``[image]``
+placeholders since plain text can't carry the bytes). Unknown block or
+inline nodes are preserved as ``[unsupported: <type>]`` markers so that
+missing content is visible rather than silently dropped; unknown marks
+are silently ignored (the underlying text is still rendered).
 
 Callers can pass ``heading_offset`` to shift every ``heading`` level by a
 fixed amount — the ticket-context renderer uses this to nest ADF headings
@@ -94,6 +96,13 @@ def _render_block(node: _AdfNode, *, heading_offset: int) -> str:
         # listItem is normally rendered by _render_list; reaching it here means
         # it appeared at the top level, which we render as its block children.
         return "\n\n".join(_render_blocks(content, heading_offset=heading_offset))
+    if node_type == "rule":
+        return "---"
+    if node_type in ("mediaSingle", "mediaGroup", "media"):
+        # Plain markdown can't carry image bytes; surface a neutral placeholder
+        # so readers know an attachment was here without the noisy
+        # "[unsupported: ...]" framing.
+        return "[image]"
     return f"[unsupported: {node_type}]"
 
 
@@ -146,6 +155,15 @@ def _render_inline(content: list[_AdfNode]) -> str:
         elif node_type == "emoji":
             attrs = node.get("attrs") or {}
             parts.append(attrs.get("text") or attrs.get("shortName") or "")
+        elif node_type == "inlineCard":
+            # Smart Links pulled into Jira show as inlineCard with the URL
+            # in attrs; surfacing the URL keeps the link recoverable for the
+            # LLM (and any human reading the markdown).
+            attrs = node.get("attrs") or {}
+            url = attrs.get("url", "")
+            parts.append(url if url else "[link]")
+        elif node_type in ("mediaInline", "media"):
+            parts.append("[image]")
         else:
             parts.append(f"[unsupported: {node_type}]")
     return "".join(parts)

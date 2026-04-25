@@ -1,4 +1,13 @@
+<p align="center">
+  <img src=".github/assets/banner.png" alt="jira-context-mcp" width="100%">
+</p>
+
 # jira-context-mcp
+
+[![CI](https://github.com/pdudzinsky/jira-context-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/pdudzinsky/jira-context-mcp/actions/workflows/ci.yml)
+[![Python: 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![MCP](https://img.shields.io/badge/MCP-compatible-purple.svg)](https://modelcontextprotocol.io)
 
 Pull rich Jira ticket context into your LLM during development. One MCP call returns the full parent hierarchy, siblings, comments, and Smart Checklist ACCs as structured markdown. Read-only by design — built for developers who read tickets, not manage them.
 

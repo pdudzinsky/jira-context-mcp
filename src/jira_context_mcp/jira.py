@@ -24,7 +24,7 @@ import httpx
 
 from .adf import adf_to_markdown
 from .config import Settings
-from .models import Checklist, ChecklistItem, ChecklistStatus, Comment, Ticket
+from .models import Checklist, ChecklistItem, ChecklistSection, ChecklistStatus, Comment, Ticket
 
 logger = logging.getLogger(__name__)
 
@@ -86,8 +86,8 @@ _STATUS_MAP: Final[dict[str, ChecklistStatus]] = {
 }
 
 
-def parse_checklist_markdown(raw: str) -> list[ChecklistItem]:
-    """Parse a Smart Checklist markdown blob into a flat item list.
+def parse_checklist_markdown(raw: str) -> Checklist:
+    """Parse a Smart Checklist markdown blob into a structured :class:`Checklist`.
 
     Handles two formats:
 
@@ -99,15 +99,39 @@ def parse_checklist_markdown(raw: str) -> list[ChecklistItem]:
        ``[~] text`` with the status carried inline. Recognised for
        backward compatibility with older instances and ad-hoc fixtures.
 
-    Section headers, blank lines, and any text outside both shapes are
-    silently skipped. Lines with an unrecognised legacy marker are kept
-    with status coerced to ``"open"`` and a warning emitted.
+    Section grouping is preserved: each ``#``/``##`` header opens a new
+    :class:`ChecklistSection`. Items appearing before the first header are
+    grouped under a section with ``title=None``. Sections that contain no
+    items are kept in the structure (so the renderer can decide whether to
+    show or skip them); blank lines between items are ignored.
+
+    Lines with an unrecognised legacy marker are kept with status coerced
+    to ``"open"`` and a warning emitted.
     """
-    items: list[ChecklistItem] = []
+    sections: list[ChecklistSection] = []
+    current_title: str | None = None
+    current_items: list[ChecklistItem] = []
+    seen_any_section = False
+
+    def flush() -> None:
+        # Don't emit a leading title=None section if it has no items —
+        # that's the common case where the first line of the markdown is
+        # a header, and there is no orphan content to record.
+        if not seen_any_section and not current_items:
+            return
+        sections.append(
+            ChecklistSection(title=current_title, items=list(current_items))
+        )
+
     for line in raw.splitlines():
         if not line.strip():
             continue
+
         if _HEADER_RE.match(line):
+            flush()
+            current_title = line.lstrip("#").strip() or None
+            current_items = []
+            seen_any_section = True
             continue
 
         # Try the legacy task-list form first — it's the more specific shape
@@ -126,7 +150,7 @@ def parse_checklist_markdown(raw: str) -> list[ChecklistItem]:
                     line,
                 )
                 status = "open"
-            items.append(ChecklistItem(name=name, status=status))
+            current_items.append(ChecklistItem(name=name, status=status))
             continue
 
         bullet = _CHECKLIST_BULLET_RE.match(line)
@@ -134,9 +158,11 @@ def parse_checklist_markdown(raw: str) -> list[ChecklistItem]:
             name = bullet.group(1).strip()
             if not name:
                 continue
-            items.append(ChecklistItem(name=name, status="open"))
+            current_items.append(ChecklistItem(name=name, status="open"))
             continue
-    return items
+
+    flush()
+    return Checklist(sections=sections)
 
 
 class JiraClient:
@@ -215,8 +241,8 @@ class JiraClient:
         """Fetch the Smart Checklist for ``key``, or ``None`` if absent.
 
         ``None`` means the plugin is not installed or the issue has no
-        checklist property; an empty but present checklist surfaces as
-        ``Checklist(items=[])``.
+        checklist property; an empty but present checklist surfaces as a
+        :class:`Checklist` with no sections.
         """
         response = await self._request(
             "GET",
@@ -227,8 +253,8 @@ class JiraClient:
             return None
         value = response.json().get("value")
         if not isinstance(value, str):
-            return Checklist(items=[])
-        return Checklist(items=parse_checklist_markdown(value))
+            return Checklist(sections=[])
+        return parse_checklist_markdown(value)
 
     async def get_comments(self, key: str) -> list[Comment]:
         """Fetch the first page of comments for ``key`` (up to 100).

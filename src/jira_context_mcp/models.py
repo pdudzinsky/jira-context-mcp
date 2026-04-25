@@ -31,14 +31,32 @@ class ChecklistItem(_Frozen):
     status: ChecklistStatus = "open"
 
 
+class ChecklistSection(_Frozen):
+    """A group of items under a single Smart Checklist header.
+
+    ``title`` is the markdown header text minus the leading ``#`` characters,
+    or ``None`` for items appearing before the first header (rare — modern
+    Smart Checklist always starts with a section header).
+    """
+
+    title: str | None
+    items: list[ChecklistItem]
+
+
 class Checklist(_Frozen):
     """Smart Checklist attached to a Jira issue.
 
-    Items are flat. Section headers present in the raw Smart Checklist markdown
-    are not modeled in v0.1; they are discarded during parsing.
+    Stored as an ordered list of sections preserving the grouping that
+    Smart Checklist exposes in the Jira UI. The flat ``items`` accessor is
+    kept as a property for callers that need the full list without caring
+    about sections (e.g. counting, the simple "no items" check).
     """
 
-    items: list[ChecklistItem]
+    sections: list[ChecklistSection]
+
+    @property
+    def items(self) -> list[ChecklistItem]:
+        return [item for section in self.sections for item in section.items]
 
 
 class Comment(_Frozen):

@@ -14,7 +14,7 @@ were not fetched) render without any marker.
 
 from __future__ import annotations
 
-from .models import ChecklistItem, Comment, Ticket, TicketContext, TreeNode
+from .models import Checklist, ChecklistItem, Comment, Ticket, TicketContext, TreeNode
 
 _STATUS_MARKER: dict[str, str] = {
     "open": "[ ]",
@@ -25,12 +25,33 @@ _STATUS_MARKER: dict[str, str] = {
 
 
 def render_checklist_items(items: list[ChecklistItem]) -> str:
-    """Render Smart Checklist items as a markdown task list.
+    """Render a flat list of Smart Checklist items as a markdown task list.
 
     Public helper so other tools (e.g. the standalone ``get_smart_checklist``
     MCP tool) can reuse the canonical marker mapping without duplicating it.
     """
     return "\n".join(f"- {_STATUS_MARKER[item.status]} {item.name}" for item in items)
+
+
+def render_checklist(checklist: Checklist, *, heading_level: int = 2) -> str:
+    """Render a :class:`Checklist` as markdown, preserving section grouping.
+
+    Each non-empty section is emitted as a header at ``heading_level`` (e.g.
+    ``##`` for level 2, ``####`` for level 4 — pick a level that nests under
+    the surrounding document structure) followed by its items as a markdown
+    task list. Sections that contain no items, and an unnamed leading
+    section without items, are skipped — empty headers carry no checklist
+    information for the LLM and only add visual noise.
+    """
+    prefix = "#" * max(1, min(heading_level, 6))
+    parts: list[str] = []
+    for section in checklist.sections:
+        if not section.items:
+            continue
+        if section.title:
+            parts.append(f"{prefix} {section.title}")
+        parts.append(render_checklist_items(section.items))
+    return "\n\n".join(parts)
 
 
 def render_ticket_context(
@@ -103,7 +124,9 @@ def _render_checklist(node: TreeNode) -> list[str]:
         return ["### Smart Checklist", "_(no checklist)_"]
     if not node.checklist.items:
         return ["### Smart Checklist", "_(empty checklist)_"]
-    return ["### Smart Checklist", render_checklist_items(node.checklist.items)]
+    # heading_level=4 keeps section headers (#### ...) one level below the
+    # node's own ### Smart Checklist heading, preserving markdown hierarchy.
+    return ["### Smart Checklist", render_checklist(node.checklist, heading_level=4)]
 
 
 def _render_tree(ctx: TicketContext) -> str:

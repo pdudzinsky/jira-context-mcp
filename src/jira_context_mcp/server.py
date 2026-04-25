@@ -22,7 +22,7 @@ from .jira import (
     JiraNotFoundError,
     JiraRateLimitError,
 )
-from .markdown import render_checklist_items, render_ticket_context
+from .markdown import render_checklist, render_ticket_context
 
 mcp: FastMCP = FastMCP("jira-context-mcp")
 
@@ -165,7 +165,10 @@ async def get_smart_checklist(issue_key: str) -> str:
                 f"Smart Checklist on {issue_key}: empty "
                 "(plugin active but no items recorded)."
             )
-        return f"# Smart Checklist: {issue_key}\n\n{render_checklist_items(checklist.items)}\n"
+        return (
+            f"# Smart Checklist: {issue_key}\n\n"
+            f"{render_checklist(checklist, heading_level=2)}\n"
+        )
     except* JiraAuthError as eg:
         msgs = "; ".join(str(e) for e in eg.exceptions)
         error = (

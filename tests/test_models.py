@@ -75,8 +75,13 @@ def test_comment_with_tz_aware_created_constructs() -> None:
 
 def test_ticket_is_frozen() -> None:
     t = Ticket(
-        key="A-1", summary="s", status="Open", issue_type="Story",
-        assignee=None, description_md=None, parent_key=None,
+        key="A-1",
+        summary="s",
+        status="Open",
+        issue_type="Story",
+        assignee=None,
+        description_md=None,
+        parent_key=None,
         url="https://x/browse/A-1",
     )
     with pytest.raises(ValidationError):

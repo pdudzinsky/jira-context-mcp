@@ -149,9 +149,7 @@ async def test_focus_deeper_than_depth_down_still_reachable() -> None:
     """Focus at level 3 with depth_down=1 should still appear via spine expansion."""
     chain = ["A", "B", "C", "D"]  # A is root, D is focus
     tickets = {
-        chain[i]: make_ticket(
-            chain[i], parent_key=chain[i - 1] if i > 0 else None
-        )
+        chain[i]: make_ticket(chain[i], parent_key=chain[i - 1] if i > 0 else None)
         for i in range(len(chain))
     }
     fake = FakeClient(
@@ -186,9 +184,7 @@ async def test_depth_up_truncation_emits_warning(
     """When walk_up exhausts depth_up before reaching the root, log a WARN."""
     chain = ["A", "B", "C", "D", "E"]  # E is the actual root
     tickets = {
-        chain[i]: make_ticket(
-            chain[i], parent_key=chain[i + 1] if i + 1 < len(chain) else None
-        )
+        chain[i]: make_ticket(chain[i], parent_key=chain[i + 1] if i + 1 < len(chain) else None)
         for i in range(len(chain))
     }
     fake = FakeClient(tickets=tickets)
@@ -223,8 +219,7 @@ async def test_walk_down_uses_one_jql_per_layer() -> None:
     root = make_ticket("R", parent_key=None)
     mids = [make_ticket(f"M-{i}", parent_key="R") for i in range(3)]
     leaves_by_mid = {
-        m.key: [make_ticket(f"{m.key}-L{i}", parent_key=m.key) for i in range(2)]
-        for m in mids
+        m.key: [make_ticket(f"{m.key}-L{i}", parent_key=m.key) for i in range(2)] for m in mids
     }
     fake = FakeClient(
         tickets={"R": root, **{m.key: m for m in mids}},
@@ -242,9 +237,7 @@ async def test_depth_down_is_clamped_to_three() -> None:
     # build a 6-level chain, focus at the leaf
     chain = ["A", "B", "C", "D", "E", "F"]
     tickets = {
-        chain[i]: make_ticket(
-            chain[i], parent_key=chain[i - 1] if i > 0 else None
-        )
+        chain[i]: make_ticket(chain[i], parent_key=chain[i - 1] if i > 0 else None)
         for i in range(len(chain))
     }
     children: dict[str, list[Ticket]] = {

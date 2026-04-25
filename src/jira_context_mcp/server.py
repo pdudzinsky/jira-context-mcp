@@ -93,14 +93,9 @@ async def get_issue_tree(
         return render_issue_tree(tree)
     except* JiraAuthError as eg:
         msgs = "; ".join(str(e) for e in eg.exceptions)
-        error = (
-            "Error: Jira authentication failed. "
-            f"Check JIRA_EMAIL and JIRA_API_TOKEN. ({msgs})"
-        )
+        error = f"Error: Jira authentication failed. Check JIRA_EMAIL and JIRA_API_TOKEN. ({msgs})"
     except* JiraNotFoundError as eg:
-        keys = sorted(
-            {e.key for e in eg.exceptions if isinstance(e, JiraNotFoundError) and e.key}
-        )
+        keys = sorted({e.key for e in eg.exceptions if isinstance(e, JiraNotFoundError) and e.key})
         if keys:
             error = f"Error: ticket(s) not found in Jira: {', '.join(keys)}"
         else:
@@ -108,10 +103,7 @@ async def get_issue_tree(
             error = f"Error: Jira returned 404 — {msgs}"
     except* JiraRateLimitError as eg:
         msgs = "; ".join(str(e) for e in eg.exceptions)
-        error = (
-            "Error: Jira rate limit exceeded after retries. "
-            f"Try again shortly. ({msgs})"
-        )
+        error = f"Error: Jira rate limit exceeded after retries. Try again shortly. ({msgs})"
     except* JiraError as eg:
         msgs = "; ".join(str(e) for e in eg.exceptions)
         error = f"Error: Jira request failed — {msgs}"
@@ -170,9 +162,7 @@ async def get_ticket_content(
             ticket_task = tg.create_task(client.get_ticket(issue_key))
             checklist_task = tg.create_task(client.get_checklist(issue_key))
             comments_task = (
-                tg.create_task(client.get_comments(issue_key))
-                if include_comments
-                else None
+                tg.create_task(client.get_comments(issue_key)) if include_comments else None
             )
         ticket = ticket_task.result()
         checklist = checklist_task.result()
@@ -185,14 +175,9 @@ async def get_ticket_content(
         )
     except* JiraAuthError as eg:
         msgs = "; ".join(str(e) for e in eg.exceptions)
-        error = (
-            "Error: Jira authentication failed. "
-            f"Check JIRA_EMAIL and JIRA_API_TOKEN. ({msgs})"
-        )
+        error = f"Error: Jira authentication failed. Check JIRA_EMAIL and JIRA_API_TOKEN. ({msgs})"
     except* JiraNotFoundError as eg:
-        keys = sorted(
-            {e.key for e in eg.exceptions if isinstance(e, JiraNotFoundError) and e.key}
-        )
+        keys = sorted({e.key for e in eg.exceptions if isinstance(e, JiraNotFoundError) and e.key})
         if keys:
             error = f"Error: ticket(s) not found in Jira: {', '.join(keys)}"
         else:
@@ -200,10 +185,7 @@ async def get_ticket_content(
             error = f"Error: Jira returned 404 — {msgs}"
     except* JiraRateLimitError as eg:
         msgs = "; ".join(str(e) for e in eg.exceptions)
-        error = (
-            "Error: Jira rate limit exceeded after retries. "
-            f"Try again shortly. ({msgs})"
-        )
+        error = f"Error: Jira rate limit exceeded after retries. Try again shortly. ({msgs})"
     except* JiraError as eg:
         msgs = "; ".join(str(e) for e in eg.exceptions)
         error = f"Error: Jira request failed — {msgs}"
@@ -249,33 +231,20 @@ async def get_smart_checklist(issue_key: str) -> str:
                 "(plugin not installed, or this ticket doesn't use it)."
             )
         if not checklist.items:
-            return (
-                f"Smart Checklist on {issue_key}: empty "
-                "(plugin active but no items recorded)."
-            )
+            return f"Smart Checklist on {issue_key}: empty (plugin active but no items recorded)."
         total = len(checklist.items)
         done = sum(1 for item in checklist.items if item.status == "done")
-        count = (
-            f"{total} item{'s' if total != 1 else ''}"
-            if done == 0
-            else f"{done}/{total} done"
-        )
+        count = f"{total} item{'s' if total != 1 else ''}" if done == 0 else f"{done}/{total} done"
         return (
             f"# Smart Checklist: {issue_key} ({count})\n\n"
             f"{render_checklist(checklist, heading_level=2)}\n"
         )
     except* JiraAuthError as eg:
         msgs = "; ".join(str(e) for e in eg.exceptions)
-        error = (
-            "Error: Jira authentication failed. "
-            f"Check JIRA_EMAIL and JIRA_API_TOKEN. ({msgs})"
-        )
+        error = f"Error: Jira authentication failed. Check JIRA_EMAIL and JIRA_API_TOKEN. ({msgs})"
     except* JiraRateLimitError as eg:
         msgs = "; ".join(str(e) for e in eg.exceptions)
-        error = (
-            "Error: Jira rate limit exceeded after retries. "
-            f"Try again shortly. ({msgs})"
-        )
+        error = f"Error: Jira rate limit exceeded after retries. Try again shortly. ({msgs})"
     except* JiraError as eg:
         msgs = "; ".join(str(e) for e in eg.exceptions)
         error = f"Error: Jira request failed — {msgs}"

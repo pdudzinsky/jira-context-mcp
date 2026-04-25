@@ -112,9 +112,7 @@ def test_render_checklist_skips_empty_sections() -> None:
 
 
 def test_render_checklist_unsectioned_items_omit_header() -> None:
-    cl = Checklist(
-        sections=[ChecklistSection(title=None, items=[ChecklistItem(name="x")])]
-    )
+    cl = Checklist(sections=[ChecklistSection(title=None, items=[ChecklistItem(name="x")])])
     assert render_checklist(cl) == "- [ ] x"
 
 
@@ -129,10 +127,12 @@ def _build_3level_tree() -> TreeNode:
     mid1_t = make_ticket("MID-1", summary="Mid one", parent_key="ROOT-1", status="Done")
     mid2_t = make_ticket("MID-2", summary="Mid two", parent_key="ROOT-1", status="In Progress")
     mid3_t = make_ticket("MID-3", summary="Mid three", parent_key="ROOT-1", status="To Do")
-    leaf_a = make_ticket("LEAF-A", summary="Leaf a", issue_type="Task",
-                         parent_key="MID-2", status="Done")
-    leaf_b = make_ticket("LEAF-B", summary="Leaf b", issue_type="Task",
-                         parent_key="MID-2", status="In Progress")
+    leaf_a = make_ticket(
+        "LEAF-A", summary="Leaf a", issue_type="Task", parent_key="MID-2", status="Done"
+    )
+    leaf_b = make_ticket(
+        "LEAF-B", summary="Leaf b", issue_type="Task", parent_key="MID-2", status="In Progress"
+    )
     return node(
         root_t,
         children=[
@@ -296,9 +296,7 @@ def test_render_ticket_content_omits_checklist_when_none() -> None:
 
 def test_render_ticket_content_comments_section_absent_when_flag_false() -> None:
     t = make_ticket("FOO-1")
-    c = Comment(
-        author="A", created=datetime(2026, 1, 1, tzinfo=UTC), body_md="hi"
-    )
+    c = Comment(author="A", created=datetime(2026, 1, 1, tzinfo=UTC), body_md="hi")
     out = render_ticket_content(t, checklist=None, comments=[c], include_comments=False)
     assert "Comments" not in out
 

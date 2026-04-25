@@ -153,17 +153,14 @@ def _render_children(node: TreeNode, prefix: str) -> list[str]:
     return lines
 
 
-def _format_tree_line(
-    node: TreeNode, *, prefix: str, branch: str, is_root: bool = False
-) -> str:
+def _format_tree_line(node: TreeNode, *, prefix: str, branch: str, is_root: bool = False) -> str:
     ticket = node.ticket
     if node.is_focus:
         marker, suffix = "🎯 ", " ⬅️ FOCUS"
     else:
         marker, suffix = "", ""
     body = (
-        f"{marker}{ticket.key} · [{ticket.issue_type}] {ticket.summary} "
-        f"· {ticket.status}{suffix}"
+        f"{marker}{ticket.key} · [{ticket.issue_type}] {ticket.summary} · {ticket.status}{suffix}"
     )
     if is_root:
         return body
@@ -226,7 +223,5 @@ def _render_comments_body(comments: list[Comment]) -> list[str]:
 def _render_comment(comment: Comment) -> list[str]:
     date_str = comment.created.strftime("%Y-%m-%d %H:%M")
     body = comment.body_md or "_(empty comment)_"
-    quoted = [f"> {line}" if line else ">" for line in body.splitlines()] or [
-        "> _(empty)_"
-    ]
+    quoted = [f"> {line}" if line else ">" for line in body.splitlines()] or ["> _(empty)_"]
     return [f"**{date_str}, {comment.author}:**", *quoted, ""]

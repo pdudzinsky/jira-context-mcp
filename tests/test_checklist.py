@@ -42,9 +42,7 @@ def test_unknown_legacy_marker_falls_back_to_open_with_warning(
         cl = parse_checklist_markdown("[?] strange marker")
     assert len(cl.items) == 1
     assert cl.items[0].status == "open"
-    assert any(
-        "unknown Smart Checklist status marker" in rec.message for rec in caplog.records
-    )
+    assert any("unknown Smart Checklist status marker" in rec.message for rec in caplog.records)
 
 
 # ---------- modern bullet format ----------
@@ -76,13 +74,7 @@ def test_section_header_opens_new_section() -> None:
 
 
 def test_multiple_sections_keep_items_separate() -> None:
-    raw = (
-        "## 1. First\n"
-        "- a\n"
-        "- b\n"
-        "## 2. Second\n"
-        "- c\n"
-    )
+    raw = "## 1. First\n- a\n- b\n## 2. Second\n- c\n"
     cl = parse_checklist_markdown(raw)
     assert [s.title for s in cl.sections] == ["1. First", "2. Second"]
     assert [it.name for s in cl.sections for it in s.items] == ["a", "b", "c"]

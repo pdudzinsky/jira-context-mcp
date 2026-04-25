@@ -69,9 +69,7 @@ async def build_issue_tree(
     return _build_subtree(root, children_map=children_map, focus_key=focus_key)
 
 
-async def _walk_up(
-    client: JiraClient, focus_key: str, *, depth_up: int
-) -> list[Ticket]:
+async def _walk_up(client: JiraClient, focus_key: str, *, depth_up: int) -> list[Ticket]:
     """Walk parent links from ``focus_key`` toward the root.
 
     Returns the spine in root-first order. Raises on parent-link cycles.
@@ -85,9 +83,7 @@ async def _walk_up(
         if current_key is None:
             break
         if current_key in seen:
-            raise ValueError(
-                f"cycle detected at {current_key!r}; visited keys: {sorted(seen)}"
-            )
+            raise ValueError(f"cycle detected at {current_key!r}; visited keys: {sorted(seen)}")
         seen.add(current_key)
         ticket = await client.get_ticket(current_key)
         spine.append(ticket)

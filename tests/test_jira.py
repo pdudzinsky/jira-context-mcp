@@ -81,9 +81,7 @@ class TestRequestRetry:
                 with pytest.raises(JiraNotFoundError):
                     await client.get_ticket("FOO-1")
 
-    async def test_404_with_allow_404_returns_response(
-        self, client_factory, base_url: str
-    ) -> None:
+    async def test_404_with_allow_404_returns_response(self, client_factory, base_url: str) -> None:
         """get_checklist sets allow_404=True under the hood; verify the path."""
         async with client_factory() as client:
             with respx.mock(base_url=base_url) as router:
@@ -104,9 +102,7 @@ class TestRequestRetry:
                 with pytest.raises(JiraRateLimitError):
                     await client.get_ticket("FOO-1")
 
-    async def test_429_then_200_succeeds(
-        self, client_factory, base_url: str
-    ) -> None:
+    async def test_429_then_200_succeeds(self, client_factory, base_url: str) -> None:
         async with client_factory(max_retries=2) as client:
             with respx.mock(base_url=base_url) as router:
                 route = router.get("/rest/api/3/issue/FOO-1")
@@ -150,9 +146,7 @@ class TestRequestRetry:
                 with pytest.raises(JiraError):
                     await client.get_ticket("FOO-1")
 
-    async def test_5xx_then_200_succeeds(
-        self, client_factory, base_url: str
-    ) -> None:
+    async def test_5xx_then_200_succeeds(self, client_factory, base_url: str) -> None:
         async with client_factory(max_retries=2) as client:
             with respx.mock(base_url=base_url) as router:
                 route = router.get("/rest/api/3/issue/FOO-1")
@@ -163,9 +157,7 @@ class TestRequestRetry:
                 ticket = await client.get_ticket("FOO-1")
                 assert ticket.key == "FOO-1"
 
-    async def test_timeout_exception_retried(
-        self, client_factory, base_url: str
-    ) -> None:
+    async def test_timeout_exception_retried(self, client_factory, base_url: str) -> None:
         async with client_factory(max_retries=2) as client:
             with respx.mock(base_url=base_url) as router:
                 route = router.get("/rest/api/3/issue/FOO-1")
@@ -176,9 +168,7 @@ class TestRequestRetry:
                 ticket = await client.get_ticket("FOO-1")
                 assert ticket.key == "FOO-1"
 
-    async def test_network_error_retried(
-        self, client_factory, base_url: str
-    ) -> None:
+    async def test_network_error_retried(self, client_factory, base_url: str) -> None:
         async with client_factory(max_retries=2) as client:
             with respx.mock(base_url=base_url) as router:
                 route = router.get("/rest/api/3/issue/FOO-1")
@@ -197,9 +187,7 @@ class TestRequestRetry:
 
 @pytest.mark.usefixtures("no_sleep")
 class TestPublicApi:
-    async def test_get_ticket_maps_full_payload(
-        self, client_factory, base_url: str
-    ) -> None:
+    async def test_get_ticket_maps_full_payload(self, client_factory, base_url: str) -> None:
         payload = {
             "key": "FOO-1",
             "fields": {
@@ -280,9 +268,7 @@ class TestPublicApi:
         assert cl is not None
         assert cl.sections == []
 
-    async def test_get_comments_happy_path(
-        self, client_factory, base_url: str
-    ) -> None:
+    async def test_get_comments_happy_path(self, client_factory, base_url: str) -> None:
         payload = {
             "comments": [
                 {
@@ -349,9 +335,7 @@ class TestPublicApi:
                     await client.get_comments("FOO-1")
         assert any("pagination not implemented" in r.message for r in caplog.records)
 
-    async def test_get_children_of_empty_returns_empty_dict(
-        self, client_factory
-    ) -> None:
+    async def test_get_children_of_empty_returns_empty_dict(self, client_factory) -> None:
         async with client_factory() as client:
             assert await client.get_children_of([]) == {}
 
@@ -388,9 +372,7 @@ class TestPublicApi:
         async with client_factory() as client:
             with respx.mock(base_url=base_url) as router:
                 router.post("/rest/api/3/search/jql").mock(
-                    return_value=httpx.Response(
-                        200, json={"issues": issues, "isLast": True}
-                    )
+                    return_value=httpx.Response(200, json={"issues": issues, "isLast": True})
                 )
                 kids = await client.get_children_of(["ROOT-1"])
         assert [t.key for t in kids["ROOT-1"]] == ["Z-LAST", "A-FIRST", "M-MIDDLE"]
@@ -403,9 +385,7 @@ class TestPublicApi:
 
 @pytest.mark.usefixtures("no_sleep")
 class TestHeaders:
-    async def test_user_agent_and_accept_headers_set(
-        self, client_factory, base_url: str
-    ) -> None:
+    async def test_user_agent_and_accept_headers_set(self, client_factory, base_url: str) -> None:
         async with client_factory() as client:
             with respx.mock(base_url=base_url) as router:
                 route = router.get("/rest/api/3/issue/FOO-1").mock(
@@ -417,9 +397,7 @@ class TestHeaders:
         assert request.headers.get("user-agent", "").startswith("jira-context-mcp/")
         assert request.headers.get("accept") == "application/json"
 
-    async def test_basic_auth_header_present(
-        self, client_factory, base_url: str
-    ) -> None:
+    async def test_basic_auth_header_present(self, client_factory, base_url: str) -> None:
         async with client_factory() as client:
             with respx.mock(base_url=base_url) as router:
                 route = router.get("/rest/api/3/issue/FOO-1").mock(

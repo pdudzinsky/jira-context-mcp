@@ -41,9 +41,7 @@ def adf_to_markdown(adf: Any, *, heading_offset: int = 0) -> str | None:
     if not isinstance(adf, dict) or adf.get("type") != "doc":
         return None
     blocks = [
-        b
-        for b in _render_blocks(adf.get("content") or [], heading_offset=heading_offset)
-        if b
+        b for b in _render_blocks(adf.get("content") or [], heading_offset=heading_offset) if b
     ]
     result = "\n\n".join(blocks).strip()
     return result or None
@@ -106,9 +104,7 @@ def _render_block(node: _AdfNode, *, heading_offset: int) -> str:
     return f"[unsupported: {node_type}]"
 
 
-def _render_list(
-    items: list[_AdfNode], *, bullet: bool, heading_offset: int
-) -> str:
+def _render_list(items: list[_AdfNode], *, bullet: bool, heading_offset: int) -> str:
     """Render a bulletList or orderedList.
 
     ``attrs.order`` on ``orderedList`` is intentionally ignored: markdown

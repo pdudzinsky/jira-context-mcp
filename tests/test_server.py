@@ -8,9 +8,7 @@ import httpx
 import pytest
 import respx
 
-CHECKLIST_PATH = (
-    "/rest/api/3/issue/{key}/properties/com.railsware.SmartChecklist.checklist"
-)
+CHECKLIST_PATH = "/rest/api/3/issue/{key}/properties/com.railsware.SmartChecklist.checklist"
 
 
 def _ticket_payload(key: str, parent: str | None = None) -> dict[str, Any]:
@@ -117,9 +115,7 @@ class TestGetIssueTree:
         from jira_context_mcp.server import get_issue_tree
 
         with respx.mock(base_url=base_url) as router:
-            router.get("/rest/api/3/issue/FOO-1").mock(
-                return_value=httpx.Response(401, json={})
-            )
+            router.get("/rest/api/3/issue/FOO-1").mock(return_value=httpx.Response(401, json={}))
             out = await get_issue_tree(issue_key="FOO-1")
         assert out.startswith("Error: Jira authentication failed")
 
@@ -172,9 +168,7 @@ class TestGetTicketContent:
                 return_value=httpx.Response(200, json=_ticket_payload("FOO-1"))
             )
             router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
-                return_value=httpx.Response(
-                    200, json={"value": "## Section\n- alpha\n- beta"}
-                )
+                return_value=httpx.Response(200, json={"value": "## Section\n- alpha\n- beta"})
             )
             out = await get_ticket_content(issue_key="FOO-1")
         assert "## Smart Checklist (2 items)" in out
@@ -229,9 +223,7 @@ class TestGetTicketContent:
         from jira_context_mcp.server import get_ticket_content
 
         with respx.mock(base_url=base_url) as router:
-            router.get("/rest/api/3/issue/FOO-1").mock(
-                return_value=httpx.Response(401, json={})
-            )
+            router.get("/rest/api/3/issue/FOO-1").mock(return_value=httpx.Response(401, json={}))
             router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
                 return_value=httpx.Response(401, json={})
             )
@@ -301,6 +293,7 @@ async def test_get_issue_tree_missing_env_returns_missing_vars(
     for var in ("JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"):
         monkeypatch.delenv(var, raising=False)
     from jira_context_mcp.config import get_settings
+
     get_settings.cache_clear()
     from jira_context_mcp.server import get_issue_tree
 
@@ -317,6 +310,7 @@ async def test_get_ticket_content_invalid_url_returns_invalid_config(
     monkeypatch.setenv("JIRA_EMAIL", "test@example.com")
     monkeypatch.setenv("JIRA_API_TOKEN", "dummy")
     from jira_context_mcp.config import get_settings
+
     get_settings.cache_clear()
     from jira_context_mcp.server import get_ticket_content
 

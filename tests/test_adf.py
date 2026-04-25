@@ -95,9 +95,7 @@ def test_mark_link() -> None:
 
 
 def test_marks_stack() -> None:
-    out = adf_to_markdown(
-        doc(para(text("x", [{"type": "strong"}, {"type": "em"}])))
-    )
+    out = adf_to_markdown(doc(para(text("x", [{"type": "strong"}, {"type": "em"}]))))
     assert out == "***x***"
 
 
@@ -228,9 +226,7 @@ def test_hard_break_in_paragraph() -> None:
 
 
 def test_mention_with_text() -> None:
-    out = adf_to_markdown(
-        doc(para({"type": "mention", "attrs": {"id": "abc", "text": "@Alice"}}))
-    )
+    out = adf_to_markdown(doc(para({"type": "mention", "attrs": {"id": "abc", "text": "@Alice"}})))
     assert out == "@Alice"
 
 
@@ -262,9 +258,7 @@ def test_emoji_empty() -> None:
 
 
 def test_inline_card_with_url() -> None:
-    out = adf_to_markdown(
-        doc(para({"type": "inlineCard", "attrs": {"url": "https://ex.com/1"}}))
-    )
+    out = adf_to_markdown(doc(para({"type": "inlineCard", "attrs": {"url": "https://ex.com/1"}})))
     assert out == "https://ex.com/1"
 
 
@@ -290,9 +284,7 @@ def test_media_inline_renders_image_placeholder_inline() -> None:
 
 
 def test_rule_renders_horizontal_divider() -> None:
-    out = adf_to_markdown(
-        doc(para(text("before")), {"type": "rule"}, para(text("after")))
-    )
+    out = adf_to_markdown(doc(para(text("before")), {"type": "rule"}, para(text("after"))))
     assert out == "before\n\n---\n\nafter"
 
 

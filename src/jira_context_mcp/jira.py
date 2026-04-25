@@ -53,9 +53,7 @@ class JiraRateLimitError(JiraError):
     """Rate limit could not be cleared within the configured retry budget."""
 
 
-_USER_AGENT: Final = (
-    "jira-context-mcp/0.1.0 (+https://github.com/pdudzinsky/jira-context-mcp)"
-)
+_USER_AGENT: Final = "jira-context-mcp/0.1.0 (+https://github.com/pdudzinsky/jira-context-mcp)"
 _DEFAULT_HEADERS: Final[dict[str, str]] = {
     "Accept": "application/json",
     "User-Agent": _USER_AGENT,
@@ -119,9 +117,7 @@ def parse_checklist_markdown(raw: str) -> Checklist:
         # a header, and there is no orphan content to record.
         if not seen_any_section and not current_items:
             return
-        sections.append(
-            ChecklistSection(title=current_title, items=list(current_items))
-        )
+        sections.append(ChecklistSection(title=current_title, items=list(current_items)))
 
     for line in raw.splitlines():
         if not line.strip():
@@ -285,9 +281,7 @@ class JiraClient:
                 comments.append(parsed)
         return comments
 
-    async def get_children_of(
-        self, parent_keys: list[str]
-    ) -> dict[str, list[Ticket]]:
+    async def get_children_of(self, parent_keys: list[str]) -> dict[str, list[Ticket]]:
         """Return children grouped by parent key via a single JQL search.
 
         Uses the new ``/rest/api/3/search/jql`` endpoint with cursor-based
@@ -336,9 +330,7 @@ class JiraClient:
                 response = await self._client.request(method, url, **kwargs)
             except (httpx.TimeoutException, httpx.NetworkError) as e:
                 if is_last:
-                    raise JiraError(
-                        f"network error after {attempt + 1} attempt(s): {e}"
-                    ) from e
+                    raise JiraError(f"network error after {attempt + 1} attempt(s): {e}") from e
                 await asyncio.sleep(_compute_backoff(attempt))
                 continue
 
@@ -351,9 +343,7 @@ class JiraClient:
                 raise JiraNotFoundError(f"{method} {url} returned 404")
             if code == 429:
                 if is_last:
-                    raise JiraRateLimitError(
-                        f"rate-limited after {attempt + 1} attempt(s)"
-                    )
+                    raise JiraRateLimitError(f"rate-limited after {attempt + 1} attempt(s)")
                 server_hint = _parse_retry_after(response)
                 sleep = max(server_hint, _compute_backoff(attempt))
                 logger.warning(
@@ -369,8 +359,7 @@ class JiraClient:
             if 500 <= code < 600:
                 if is_last:
                     raise JiraError(
-                        f"server error {code} after {attempt + 1} attempt(s): "
-                        f"{response.text[:200]}"
+                        f"server error {code} after {attempt + 1} attempt(s): {response.text[:200]}"
                     )
                 await asyncio.sleep(_compute_backoff(attempt))
                 continue

@@ -24,6 +24,15 @@ _STATUS_MARKER: dict[str, str] = {
 }
 
 
+def render_checklist_items(items: list[ChecklistItem]) -> str:
+    """Render Smart Checklist items as a markdown task list.
+
+    Public helper so other tools (e.g. the standalone ``get_smart_checklist``
+    MCP tool) can reuse the canonical marker mapping without duplicating it.
+    """
+    return "\n".join(f"- {_STATUS_MARKER[item.status]} {item.name}" for item in items)
+
+
 def render_ticket_context(
     ctx: TicketContext,
     *,
@@ -94,11 +103,7 @@ def _render_checklist(node: TreeNode) -> list[str]:
         return ["### Smart Checklist", "_(no checklist)_"]
     if not node.checklist.items:
         return ["### Smart Checklist", "_(empty checklist)_"]
-    return ["### Smart Checklist", *(_render_checklist_item(i) for i in node.checklist.items)]
-
-
-def _render_checklist_item(item: ChecklistItem) -> str:
-    return f"- {_STATUS_MARKER[item.status]} {item.name}"
+    return ["### Smart Checklist", render_checklist_items(node.checklist.items)]
 
 
 def _render_tree(ctx: TicketContext) -> str:

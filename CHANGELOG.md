@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Initial project scaffolding.
+- `get_smart_checklist(issue_key)` MCP tool — fetches only the Smart Checklist for a single ticket, without the hierarchy walk. Useful as a token-efficient companion to `get_ticket_context` when only the ACCs are needed.
 
 ### Known limitations
 - Comment fetching is capped at 100 per ticket (first page only). A WARN is logged on stderr when this limit is hit.

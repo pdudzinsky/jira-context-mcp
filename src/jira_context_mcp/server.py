@@ -22,7 +22,7 @@ from .jira import (
     JiraNotFoundError,
     JiraRateLimitError,
 )
-from .markdown import render_ticket_context
+from .markdown import render_checklist_items, render_ticket_context
 
 mcp: FastMCP = FastMCP("jira-context-mcp")
 
@@ -120,5 +120,81 @@ async def get_ticket_context(
             error = f"Error: invalid max_depth parameter. {first}"
         else:
             error = f"Error: hierarchy cycle detected. {first}"
+    assert error is not None
+    return error
+
+
+@mcp.tool
+async def get_smart_checklist(issue_key: str) -> str:
+    """Fetch the Smart Checklist (Acceptance Criteria / DoD) for a single Jira ticket.
+
+    Smart Checklist is a Railsware/TitanApps Jira plugin that stores acceptance
+    criteria in issue properties (``com.railsware.SmartChecklist.checklist``),
+    not visible through the standard Jira issue endpoint. Many Atlassian Cloud
+    teams use it as the canonical location for ACCs/DoD, leaving the Jira
+    Description field minimal or with stubs like "See ACCs.".
+
+    Use this tool when:
+    - You only need the acceptance criteria of one ticket, no hierarchy
+    - The Description references "See ACCs" and you want the actual list
+    - You want a token-efficient alternative to ``get_ticket_context`` for ACC review
+
+    For a ticket plus its parents, siblings, and other context, use
+    ``get_ticket_context`` instead — it already includes the Smart Checklist
+    for every ticket on the path.
+
+    Args:
+        issue_key: Jira issue key, e.g. "PROJ-1234".
+
+    Returns:
+        Markdown task list of checklist items, an explanatory message if the
+        plugin/property is absent or the checklist is empty, or an
+        ``Error: ...`` line on failure.
+    """
+    error: str | None = None
+    try:
+        async with JiraClient.from_settings(get_settings()) as client:
+            checklist = await client.get_checklist(issue_key)
+        if checklist is None:
+            return (
+                f"Smart Checklist on {issue_key}: not present "
+                "(plugin not installed, or this ticket doesn't use it)."
+            )
+        if not checklist.items:
+            return (
+                f"Smart Checklist on {issue_key}: empty "
+                "(plugin active but no items recorded)."
+            )
+        return f"# Smart Checklist: {issue_key}\n\n{render_checklist_items(checklist.items)}\n"
+    except* JiraAuthError as eg:
+        msgs = "; ".join(str(e) for e in eg.exceptions)
+        error = (
+            "Error: Jira authentication failed. "
+            f"Check JIRA_EMAIL and JIRA_API_TOKEN. ({msgs})"
+        )
+    except* JiraRateLimitError as eg:
+        msgs = "; ".join(str(e) for e in eg.exceptions)
+        error = (
+            "Error: Jira rate limit exceeded after retries. "
+            f"Try again shortly. ({msgs})"
+        )
+    except* JiraError as eg:
+        msgs = "; ".join(str(e) for e in eg.exceptions)
+        error = f"Error: Jira request failed — {msgs}"
+    except* ValidationError as eg:
+        missing = sorted({
+            str(err["loc"][0]).upper()
+            for e in eg.exceptions
+            if isinstance(e, ValidationError)
+            for err in e.errors()
+            if err.get("type") == "missing" and err.get("loc")
+        })
+        if missing:
+            error = (
+                f"Error: missing required environment variable(s): {', '.join(missing)}. "
+                "Set them in the MCP server config (env) or a .env file."
+            )
+        else:
+            error = f"Error: invalid Jira configuration — {eg.exceptions[0]}"
     assert error is not None
     return error

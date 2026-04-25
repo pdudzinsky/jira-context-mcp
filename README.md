@@ -128,21 +128,46 @@ $EDITOR .env
 
 ## Usage
 
-Once wired up, just ask your LLM for ticket context:
+The server exposes two MCP tools.
+
+### `get_ticket_context` — full hierarchical context
+
+The main tool. Walks the parent chain, fetches Smart Checklist for every ticket on the path, lists peer tickets at each level, and optionally pulls comments. Use this when you want the complete picture.
+
+Example prompts:
 
 - _"Show me the context of PROJ-1234"_
 - _"Give me full context for PROJ-1234 including comments"_
 - _"What's the parent hierarchy of PROJ-1234?"_
-
-The LLM will call `get_ticket_context` with the arguments it inferred. You can also be explicit if the LLM guesses wrong defaults.
-
-### Tool parameters
 
 | Parameter | Type | Default | Notes |
 |---|---|---|---|
 | `issue_key` | string | required | e.g. `"PROJ-1234"` |
 | `include_comments` | bool | `false` | Comments are noisy and token-heavy — opt in when needed. |
 | `max_depth` | int | `10` | Safety limit. Real hierarchies are 2–4 levels deep; rarely needs changing. |
+
+### `get_smart_checklist` — just the ACCs for one ticket
+
+Standalone, token-efficient — fetches only the Smart Checklist (Acceptance Criteria / DoD) for a single ticket, no hierarchy walk, no description, no comments. Useful when the description says "See ACCs" and you just want the list, or when the LLM is already in a deep conversation and you want to add only the criteria for one ticket without ballooning context.
+
+Example prompts:
+
+- _"Pull the ACCs for PROJ-1234"_
+- _"What's on the Smart Checklist of PROJ-1234?"_
+- _"Show acceptance criteria for PROJ-1234"_
+
+| Parameter | Type | Default | Notes |
+|---|---|---|---|
+| `issue_key` | string | required | e.g. `"PROJ-1234"` |
+
+Output is one of:
+
+- `# Smart Checklist: PROJ-1234` followed by a markdown task list (`[x]`, `[ ]`, `[-]`, `[~]`) — when items exist
+- `Smart Checklist on PROJ-1234: empty (...)` — plugin active, zero items
+- `Smart Checklist on PROJ-1234: not present (...)` — plugin not installed or ticket doesn't use it
+- `Error: ...` — auth, rate limit, or config failure
+
+> Note: `get_ticket_context` already includes the Smart Checklist for every ticket on the path. Use `get_smart_checklist` only when you specifically want **just** the checklist of one ticket without the surrounding context.
 
 ### Errors the tool can return
 
@@ -178,6 +203,16 @@ uv run python -c "
 import asyncio
 from jira_context_mcp.server import get_ticket_context
 print(asyncio.run(get_ticket_context(issue_key='PROJ-1234', include_comments=True)))
+"
+```
+
+**Just the ACCs (no hierarchy)** — uses the standalone `get_smart_checklist` tool, much smaller output:
+
+```bash
+uv run python -c "
+import asyncio
+from jira_context_mcp.server import get_smart_checklist
+print(asyncio.run(get_smart_checklist(issue_key='PROJ-1234')))
 "
 ```
 

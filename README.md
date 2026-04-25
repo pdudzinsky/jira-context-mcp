@@ -181,6 +181,61 @@ $EDITOR .env
 |---|---|---|---|
 | `issue_key` | string | required | Single ticket. |
 
+### Workflow recipes
+
+Prompt templates for typical developer workflows. Paste any of these into Claude (or any MCP-capable LLM) along with the relevant ticket key — they **force the model to call all three tools in the right order** instead of guessing which one fits the question. Each recipe maps a real situation to a concrete tool sequence.
+
+#### Picking up a ticket from the sprint
+
+You took a leaf ticket (Subtask / Task) and the description is sparse — ACCs likely live on the parent Story. This recipe walks the hierarchy upward and pulls full content for every node above the focus.
+
+> I'm picking up **PROJ-1234** to work on. Use `jira-context-mcp` to:
+>
+> 1. Call `get_issue_tree(issue_key="PROJ-1234")` to see where this ticket sits in the hierarchy.
+> 2. Call `get_ticket_content(issue_key="PROJ-1234")` for my ticket's full detail.
+> 3. For each path node above the focus (Story, Epic), call `get_ticket_content` so I see their descriptions and ACCs. The Story usually carries the actual acceptance criteria.
+> 4. Summarize: what's the parent goal, what ACCs apply to my work, and what broader context should I keep in mind?
+
+> **Tip:** if a path node returns `Smart Checklist on KEY: not present`, skip it and check the next ancestor. ACCs in Example-style projects sometimes hop a level.
+
+#### Sprint planning — overview of an Epic
+
+Use this to assess scope and progress without pulling per-ticket descriptions for every Story.
+
+> Give me an overview of **PROJ-100** for sprint planning. Use `get_issue_tree(issue_key="PROJ-100", depth_down=2)`.
+>
+> Then summarize from the Overview block and tree only:
+>
+> - How many Stories under this Epic, statuses breakdown
+> - Which Stories look stalled (In Progress / In QA without subtask completion)
+> - Breakdown by BE / FE / QA based on `[BE]` / `[FE]` / `[QA]` markers in subtask titles
+> - What's ready to release vs what needs follow-up
+>
+> Do **not** pull individual ticket descriptions unless I ask — overview only. If I ask follow-up questions about a specific Story, then call `get_ticket_content`.
+
+#### Code review — verifying ACCs are addressed
+
+Useful right before approving a PR linked to a Story or Subtask.
+
+> I'm reviewing a PR linked to **PROJ-1234**. Use `jira-context-mcp` to:
+>
+> 1. Call `get_issue_tree(issue_key="PROJ-1234")` to find the parent Story (path node above the focus).
+> 2. Call `get_smart_checklist(issue_key="<that parent Story>")` — those are the ACCs the PR should satisfy.
+> 3. After I paste the diff, walk through each ACC and tell me which ones the diff likely addresses, which look untouched, and which are ambiguous.
+>
+> Be skeptical — if an ACC says "comment section must be hidable by the user" and the diff has no UI changes, flag it as untouched.
+
+#### Stand-up prep — multiple tickets at a glance
+
+Run this just before daily / weekly to get a quick status sweep across whatever you're juggling.
+
+> Quick status check on what I'm working on. For each of **[PROJ-1234, PROJ-1235, PROJ-1236]**:
+>
+> - Call `get_ticket_content(issue_key=..., include_comments=False)`
+> - Give me one line: ticket key, status, what the description is asking for in 10–15 words
+>
+> Then call `get_issue_tree(issue_key="PROJ-1234")` once and tell me if anything **else** under that Epic looks blocked or stalled — I want to know if my work has dependencies I missed.
+
 ### Example prompts
 
 The LLM picks the right tool based on what you ask:

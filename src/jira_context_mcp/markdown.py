@@ -111,7 +111,9 @@ def _render_node(node: TreeNode, *, include_comments: bool) -> str:
     )
 
     lines.extend(["", "### Description", ticket.description_md or "_(no description)_"])
-    lines.extend(["", *_render_checklist(node)])
+    checklist_lines = _render_checklist(node)
+    if checklist_lines:
+        lines.extend(["", *checklist_lines])
 
     if include_comments:
         lines.extend(["", *_render_comments(node)])
@@ -120,10 +122,16 @@ def _render_node(node: TreeNode, *, include_comments: bool) -> str:
 
 
 def _render_checklist(node: TreeNode) -> list[str]:
-    if node.checklist is None:
-        return ["### Smart Checklist", "_(no checklist)_"]
-    if not node.checklist.items:
-        return ["### Smart Checklist", "_(empty checklist)_"]
+    """Render the Smart Checklist for a node, or an empty list to skip the section.
+
+    Returns ``[]`` (caller drops the section entirely) when the ticket has no
+    Smart Checklist data — either the plugin isn't installed (``checklist is
+    None``) or the property exists but has no items. Both cases carry no
+    actionable information for the LLM, so omitting them keeps the output
+    focused on tickets that actually have ACCs to consider.
+    """
+    if node.checklist is None or not node.checklist.items:
+        return []
     # heading_level=4 keeps section headers (#### ...) one level below the
     # node's own ### Smart Checklist heading, preserving markdown hierarchy.
     return ["### Smart Checklist", render_checklist(node.checklist, heading_level=4)]

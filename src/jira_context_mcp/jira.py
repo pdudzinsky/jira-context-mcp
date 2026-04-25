@@ -393,7 +393,10 @@ class JiraClient:
             status=status_obj.get("name") or "Unknown",
             issue_type=issuetype_obj.get("name") or "Unknown",
             assignee=assignee_obj.get("displayName"),
-            description_md=adf_to_markdown(fields.get("description")),
+            # heading_offset=3 keeps user-authored headings ("# Story",
+            # "## Goal") inside the renderer's level-3 ### Description
+            # section instead of breaking out above the document title.
+            description_md=adf_to_markdown(fields.get("description"), heading_offset=3),
             parent_key=parent.get("key"),
             url=f"{self._base_url}/browse/{key}",
         )
@@ -427,5 +430,8 @@ def _parse_comment(raw: dict[str, Any]) -> Comment | None:
     if created.tzinfo is None:
         return None
     author = (raw.get("author") or {}).get("displayName") or "Unknown"
-    body_md = adf_to_markdown(raw.get("body")) or ""
+    # Same heading_offset rationale as for descriptions: comment bodies live
+    # inside the ### Comments section (and a > blockquote on top), so any
+    # user-authored heading is shifted to keep document hierarchy sound.
+    body_md = adf_to_markdown(raw.get("body"), heading_offset=3) or ""
     return Comment(author=author, created=created, body_md=body_md)

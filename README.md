@@ -196,7 +196,7 @@ You took a leaf ticket (Subtask / Task) and the description is sparse — ACCs l
 > 3. For each path node above the focus (Story, Epic), call `get_ticket_content` so I see their descriptions and ACCs. The Story usually carries the actual acceptance criteria.
 > 4. Summarize: what's the parent goal, what ACCs apply to my work, and what broader context should I keep in mind?
 
-> **Tip:** if a path node returns `Smart Checklist on KEY: not present`, skip it and check the next ancestor. ACCs in Example-style projects sometimes hop a level.
+> **Tip:** if a path node returns `Smart Checklist on KEY: not present`, skip it and check the next ancestor. ACCs sometimes hop a level.
 
 #### Sprint planning — overview of an Epic
 

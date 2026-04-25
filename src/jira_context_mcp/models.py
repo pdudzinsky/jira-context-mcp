@@ -1,7 +1,7 @@
-"""Domain models for Jira tickets, comments, checklists, and traversal context.
+"""Domain models for Jira tickets, comments, checklists, and the issue tree.
 
 All models are frozen pydantic ``BaseModel`` subclasses — instances are DTOs
-produced by the Jira client and the context walker, then handed off to the
+produced by the Jira client and the tree walker, then handed off to the
 markdown renderer. Mutation after construction is a bug and is rejected by
 pydantic at assignment time.
 """
@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 ChecklistStatus = Literal["open", "done", "in_progress", "skipped"]
 """Canonical Smart Checklist item states. The parser in ``jira`` maps any
@@ -75,11 +75,12 @@ class Comment(_Frozen):
 
 
 class Ticket(_Frozen):
-    """A single Jira issue, with fields sufficient to render its context.
+    """A single Jira issue with the fields needed by every renderer.
 
-    ``description_md`` is the markdown form of the ADF body (``None`` when the
-    Jira field is empty). ``parent_key`` drives the root-ward traversal, and
-    ``url`` is precomputed to keep the renderer concatenation-free.
+    ``description_md`` is the markdown form of the ADF body (``None`` when
+    the Jira field is empty). ``parent_key`` drives the root-ward traversal
+    of :class:`build_issue_tree`; ``url`` is precomputed so renderers stay
+    concatenation-free.
     """
 
     key: str
@@ -93,63 +94,19 @@ class Ticket(_Frozen):
 
 
 class TreeNode(_Frozen):
-    """One node on the root → entry path produced by the context walker.
+    """A node in the issue tree produced by :func:`build_issue_tree`.
 
-    ``children_of_parent`` lists every issue that shares this node's parent,
-    preserved in the order Jira returned from the JQL search (which roughly
-    matches rank / the order a user sees in the Jira UI). It **includes**
-    ``ticket`` itself when the node has a parent; readers tell self apart by
-    comparing ``ticket.key``. For a root node (``parent_key is None``) the
-    list is empty — the parent of the traversal root is outside the fetched
-    context.
+    The tree is rooted at the topmost ancestor reachable from the focus
+    ticket; ``children`` recursively contain the descendants that the
+    walker decided to expand (everything up to ``depth_down`` levels, plus
+    the path leading to the focus ticket whatever its actual depth).
 
-    ``comments`` is empty when the caller requested ``include_comments=False``,
-    and ``checklist`` is ``None`` when the ticket has no Smart Checklist
-    property (or the plugin is absent).
+    ``is_focus`` flags the ticket the user originally asked about. Exactly
+    one node in any tree has ``is_focus=True``; the renderer uses it to
+    place the 🎯 / ⬅️ FOCUS markers regardless of where the focus sits in
+    the hierarchy.
     """
 
     ticket: Ticket
-    checklist: Checklist | None
-    comments: list[Comment]
-    children_of_parent: list[Ticket]
-    is_entry: bool
-
-
-class TicketContext(_Frozen):
-    """Full traversal result handed from ``context`` to ``markdown``.
-
-    ``path`` is ordered from the root ancestor down to the entry ticket, which
-    is always the last element. Exactly one node in the path has
-    ``is_entry=True`` and it is that last element; invariants are checked on
-    construction. ``truncated`` is ``True`` when the upward walk hit
-    ``max_depth`` before reaching the root — the renderer surfaces this so
-    the LLM knows the hierarchy is incomplete.
-    """
-
-    path: list[TreeNode]
-    entry_key: str
-    truncated: bool = False
-
-    @property
-    def entry_node(self) -> TreeNode:
-        return self.path[-1]
-
-    @model_validator(mode="after")
-    def _check_path_invariants(self) -> TicketContext:
-        if not self.path:
-            raise ValueError("TicketContext.path must not be empty")
-        entry_indices = [i for i, node in enumerate(self.path) if node.is_entry]
-        last_index = len(self.path) - 1
-        if entry_indices != [last_index]:
-            raise ValueError(
-                "exactly one TreeNode must have is_entry=True and it must be the "
-                f"last element; got is_entry at indices {entry_indices} "
-                f"in path of length {len(self.path)}"
-            )
-        tail_key = self.path[-1].ticket.key
-        if tail_key != self.entry_key:
-            raise ValueError(
-                f"entry_key {self.entry_key!r} does not match "
-                f"path[-1].ticket.key {tail_key!r}"
-            )
-        return self
+    children: list[TreeNode]
+    is_focus: bool = False

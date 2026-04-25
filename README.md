@@ -236,17 +236,6 @@ Run this just before daily / weekly to get a quick status sweep across whatever 
 >
 > Then call `get_issue_tree(issue_key="PROJ-1234")` once and tell me if anything **else** under that Epic looks blocked or stalled — I want to know if my work has dependencies I missed.
 
-### Example prompts
-
-The LLM picks the right tool based on what you ask:
-
-- _"Show me the tree around PROJ-1234"_ → `get_issue_tree`
-- _"What's in this epic? PROJ-100"_ → `get_issue_tree(depth_down=2)`
-- _"Tell me about PROJ-240"_ → `get_ticket_content`
-- _"Show me PROJ-240 with comments"_ → `get_ticket_content(include_comments=True)`
-- _"What are the ACCs for PROJ-240?"_ → `get_smart_checklist`
-- _"Walk me through this hierarchy with full descriptions of the parents"_ → `get_issue_tree` followed by `get_ticket_content` on each parent
-
 ### Errors
 
 All errors come back as the tool response (a string starting with `Error:`) rather than exceptions:
@@ -261,7 +250,7 @@ All errors come back as the tool response (a string starting with `Error:`) rath
 
 ### From the shell (no MCP client needed)
 
-Each tool is an async Python function — call it directly with `uv run`:
+Each tool is an async Python function — call it directly with `uv run` for ad-hoc reads, debugging, or piping into other tools. All three snippets support standard shell redirects (`> file.md`) and pipes (`| glow -`).
 
 ```bash
 # Tree overview
@@ -271,47 +260,19 @@ from jira_context_mcp.server import get_issue_tree
 print(asyncio.run(get_issue_tree(issue_key='PROJ-1234')))
 "
 
-# Single ticket full content
+# Single ticket full content (add include_comments=True for the comment thread)
 uv run python -c "
 import asyncio
 from jira_context_mcp.server import get_ticket_content
-print(asyncio.run(get_ticket_content(issue_key='PROJ-1234', include_comments=True)))
+print(asyncio.run(get_ticket_content(issue_key='PROJ-1234')))
 "
 
-# Just the ACCs
+# Just the ACCs (cheapest call; doubles as a connectivity check)
 uv run python -c "
 import asyncio
 from jira_context_mcp.server import get_smart_checklist
 print(asyncio.run(get_smart_checklist(issue_key='PROJ-1234')))
 "
-```
-
-Save to a file:
-
-```bash
-uv run python -c "
-import asyncio
-from jira_context_mcp.server import get_issue_tree
-print(asyncio.run(get_issue_tree(issue_key='PROJ-1234')))
-" > PROJ-1234-tree.md
-```
-
-Pipe through a markdown pager like [`glow`](https://github.com/charmbracelet/glow):
-
-```bash
-uv run python -c "..." | glow -
-```
-
-Quick connectivity / auth check (any tool works; `get_smart_checklist` is the lightest):
-
-```bash
-uv run python -c "
-import asyncio
-from jira_context_mcp.server import get_smart_checklist
-print(asyncio.run(get_smart_checklist(issue_key='DEFINITELY-BOGUS-9999')))
-"
-# Wrong creds → "Error: Jira authentication failed ..."
-# OK creds  → "Smart Checklist on DEFINITELY-BOGUS-9999: not present (...)"
 ```
 
 ## Known limitations

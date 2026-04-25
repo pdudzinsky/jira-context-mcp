@@ -19,7 +19,7 @@ def test_empty_string_returns_no_sections() -> None:
 
 
 @pytest.mark.parametrize(
-    "marker,expected_status",
+    ("marker", "expected_status"),
     [
         (" ", "open"),
         ("x", "done"),

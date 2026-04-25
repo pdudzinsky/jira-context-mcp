@@ -7,9 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (breaking)
+- **Replaced the monolithic `get_ticket_context` with a 3-tool composable architecture.** The server now exposes `get_issue_tree`, `get_ticket_content`, and `get_smart_checklist` — each answering a single, focused question. `get_ticket_context` is removed entirely (no consumers to migrate; the project was unreleased).
+  - `get_issue_tree(issue_key, depth_up=10, depth_down=2)` — walks UP from the focus to the topmost reachable ancestor, then BFS DOWN expanding every node up to `depth_down` levels (clamped to 3) plus the spine to the focus regardless of depth. Lite per-ticket info (key, type, summary, status); the focus ticket carries a 🎯 + ⬅️ FOCUS marker. Output also carries an Overview aggregate with counts by type and status.
+  - `get_ticket_content(issue_key, include_comments=False)` — single ticket detail: description, Smart Checklist (when items exist), optional comments. Description and checklist fetched in parallel under one TaskGroup.
+  - `get_smart_checklist(issue_key)` — unchanged, still the leanest option when the LLM needs only ACCs.
+
 ### Added
 - Initial project scaffolding.
-- `get_smart_checklist(issue_key)` MCP tool — fetches only the Smart Checklist for a single ticket, without the hierarchy walk. Useful as a token-efficient companion to `get_ticket_context` when only the ACCs are needed.
+- `get_smart_checklist(issue_key)` MCP tool.
 
 ### Fixed
 - Smart Checklist parser now handles the modern Smart Checklist v3+ bullet-list format (`- text` items grouped under `## section` headers). Previously only the legacy task-list format (`[ ] text`) was recognised, so tickets using the v3 format reported as "empty checklist" even when items existed. Items in the bullet form default to `status="open"` because per-item status lives in sibling Jira properties (`SmartChecklist`, `ItemStatusSearchMeta`); legacy `[ ]/[x]/[-]/[~]` markers continue to be honored when present.

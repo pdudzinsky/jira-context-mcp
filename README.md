@@ -9,67 +9,87 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-purple.svg)](https://modelcontextprotocol.io)
 
-Pull rich Jira ticket context into your LLM during development. One MCP call returns the full parent hierarchy, siblings, comments, and Smart Checklist ACCs as structured markdown. Read-only by design — built for developers who read tickets, not manage them.
+Pull rich Jira ticket context into your LLM during development. Three composable MCP tools — one for the surrounding hierarchy, one for a single ticket's full content, one for just the Smart Checklist (ACCs) — render Jira data as structured markdown. Read-only by design, built for developers who read tickets, not manage them.
+
+## The three tools at a glance
+
+| Tool | Question it answers | Output |
+|---|---|---|
+| `get_issue_tree` | _What's around this ticket?_ | Hierarchy with focus marker — root → leaves, lite info per ticket, status overview |
+| `get_ticket_content` | _What's in this specific ticket?_ | Full description + Smart Checklist + optional comments — single ticket only |
+| `get_smart_checklist` | _Just the ACCs._ | Just the Smart Checklist — token-efficient when nothing else is needed |
+
+A typical workflow has the LLM call `get_issue_tree` first to discover structure, then drill into specific tickets with `get_ticket_content`. Each tool does one thing; they compose.
 
 ## What you get
 
-Given a single ticket key, the tool walks up the parent chain to the root (Epic/Initiative), and for each ticket on the path fetches description, Smart Checklist (rendered when the ticket actually has items), peer tickets at the same level, and optionally comments. The entry ticket is visually marked so the LLM knows where you are in the hierarchy.
+### `get_issue_tree` example
 
-Simplified sample output for `PROJ-1234`:
+Given any ticket — leaf, mid, or root — the tool walks **upward** to the topmost ancestor and then **downward** from there, building a tree centered on your ticket. Sample (simplified) output:
 
 ````markdown
-# Ticket context: PROJ-1234
+# Issue tree: PROJ-1234
 
-Path: PROJ-100 → PROJ-240 → **PROJ-1234**
+## Overview
 
-_(Generated with: include_comments=False, max_depth=10)_
+Total: 27 tickets · By type: 1 Epic, 5 Story, 21 Subtask
+By status: 24 Gotowe, 2 In QA, 1 Odrzucono
 
-## Issue tree
+## Tree
 
 ```
 PROJ-100 · [Epic] Refactor billing module · In Progress
 ├── PROJ-239 · [Story] Payment retry logic · Done
-├── → PROJ-240 · [Story] Extract invoice generation · In Progress
-│   ├── PROJ-1233 · [Task] Extract CSV export · In Progress
-│   ├── 🎯 PROJ-1234 · [Task] Add PDF template for invoices · In Progress ⬅️ ENTRY
-│   └── PROJ-1235 · [Task] Add XML export for invoices · To Do
+│   ├── PROJ-1230 · [Subtask] [BE] Retry policy · Gotowe
+│   └── PROJ-1231 · [Subtask] [BE] Idempotency keys · Gotowe
+├── PROJ-240 · [Story] Extract invoice generation · In Progress
+│   ├── PROJ-1233 · [Subtask] [BE] Extract CSV export · Gotowe
+│   ├── 🎯 PROJ-1234 · [Subtask] [BE] Add PDF template · In Progress ⬅️ FOCUS
+│   └── PROJ-1235 · [Subtask] [BE] Add XML export · To Do
 └── PROJ-260 · [Story] Email notifications · To Do
 ```
+````
 
----
+Notes:
+- **Root** is at the top, no marker — its position alone distinguishes it.
+- **Path nodes** (the spine from root to focus) get expanded regardless of `depth_down`. Other nodes expand only up to `depth_down` levels — protects against runaway trees on huge epics.
+- **Focus** marker (`🎯` + `⬅️ FOCUS`) lands on the ticket you asked about, wherever it sits in the hierarchy.
+- **JQL response order** is preserved (no alphabetical re-sort) — matches what you see in Jira UI.
+- **Lite per-ticket info** (key, type, summary, status) keeps the output scannable. Use `get_ticket_content` for full descriptions and ACCs.
 
-## PROJ-100 · [Epic] Refactor billing module
-**Status:** In Progress · **Assignee:** Alice · **URL:** https://your-org.atlassian.net/browse/PROJ-100
+### `get_ticket_content` example
 
-### Description
-Decompose the monolithic billing service into domain-aligned services.
+Full content of a single ticket — description, Smart Checklist (when present), optional comments. No hierarchy walk, no peers.
 
-### Smart Checklist (3 items)
-#### 1. Service alignment
+````markdown
+# PROJ-240 · [Story] Extract invoice generation
+**Status:** In Progress · **Assignee:** Piotr D. · **URL:** https://your-org.atlassian.net/browse/PROJ-240
+
+## Description
+Pull invoice logic out of BillingService into a new InvoiceService.
+
+## Smart Checklist (1/3 done)
+### 1. Service alignment
 - [x] Service boundary alignment reviewed
 - [-] Migration plan drafted
 - [ ] Rollout communication to support
 
----
-
-## PROJ-240 · [Story] Extract invoice generation
-**Status:** In Progress · **Assignee:** Piotr D. · **URL:** https://your-org.atlassian.net/browse/PROJ-240
-
-### Description
-Pull invoice logic out of BillingService into a new InvoiceService.
-
----
-
-## 🎯 PROJ-1234 · [Task] Add PDF template for invoices ⬅️ ENTRY
-...
+## Comments  (only when include_comments=True)
+**2026-04-22 14:05, Piotr D.:**
+> Started profiling. 80% in CSV writer.
 ````
 
-A few things to note in this layout:
+### `get_smart_checklist` example
 
-- The top-of-document `Issue tree` gives the full hierarchy at a glance — root at the top, path nodes prefixed with `→`, the entry ticket with 🎯 + `⬅️ ENTRY`, and all peers at each level shown in the order Jira returned them (approximately by rank).
-- Each per-ticket section carries the description and (when present) a Smart Checklist; tickets without a checklist simply omit the section instead of rendering an empty placeholder, so the output stays focused on tickets that have ACCs (e.g. `PROJ-240` above).
-- Smart Checklist sections preserve the grouping from Jira (`#### 1. ...`, `#### 2. ...`) and the header carries an at-a-glance count (`(3 items)` or `(N/M done)` once items are completed).
-- Comments are opt-in via `include_comments=True`; when on, each ticket on the path gets a `### Comments` block with comment dates, authors, and bodies as blockquotes.
+````markdown
+# Smart Checklist: PROJ-240 (1/3 done)
+
+## 1. Service alignment
+
+- [x] Service boundary alignment reviewed
+- [-] Migration plan drafted
+- [ ] Rollout communication to support
+````
 
 ## Prerequisites
 
@@ -121,7 +141,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 > **Heads-up on tokens:** Atlassian API tokens are ~192 characters of `base64`-ish goo. If you paste one and your line wraps in the JSON editor, whitespace can sneak into the middle of the string — Jira will then silently return 404 on private projects. Paste carefully, or strip the value through `tr -d '[:space:]'` before saving.
 
-Quit Claude Desktop fully (`Cmd+Q`, not just close the window) and reopen. The tool should appear in the available-tools list.
+Quit Claude Desktop fully (`Cmd+Q`, not just close the window) and reopen. The three tools should appear in the available-tools list.
 
 ### Other MCP clients
 
@@ -129,101 +149,81 @@ Any client that supports stdio-based MCP servers works the same way — point `c
 
 ### Local `.env` alternative
 
-If you'd rather keep credentials in a file (handy for local dev/scripting), copy `.env.example` to `.env` and fill it in:
-
 ```bash
 cp .env.example .env
 $EDITOR .env
 ```
 
-`.env` is git-ignored. It's loaded when the process is launched with `--directory` pointing at the repo root (the default for the configs above).
+`.env` is git-ignored. It's loaded when the process is launched with `--directory` pointing at the repo root.
 
 ## Usage
 
-The server exposes two MCP tools.
+### Tool parameters
 
-### `get_ticket_context` — full hierarchical context
-
-The main tool. Walks the parent chain, fetches Smart Checklist for every ticket on the path, lists peer tickets at each level, and optionally pulls comments. Use this when you want the complete picture.
-
-Example prompts:
-
-- _"Show me the context of PROJ-1234"_
-- _"Give me full context for PROJ-1234 including comments"_
-- _"What's the parent hierarchy of PROJ-1234?"_
+**`get_issue_tree`**
 
 | Parameter | Type | Default | Notes |
 |---|---|---|---|
-| `issue_key` | string | required | e.g. `"PROJ-1234"` |
+| `issue_key` | string | required | Any ticket — leaf, mid, or root. |
+| `depth_up` | int | `10` | Max levels to walk upward toward the root. Real hierarchies are 2–4 deep. |
+| `depth_down` | int | `2` | Max levels to expand below the root. Hard-capped at 3 to prevent runaway expansion on epics with hundreds of descendants. The path to the focus is always shown regardless. |
+
+**`get_ticket_content`**
+
+| Parameter | Type | Default | Notes |
+|---|---|---|---|
+| `issue_key` | string | required | Single ticket. |
 | `include_comments` | bool | `false` | Comments are noisy and token-heavy — opt in when needed. |
-| `max_depth` | int | `10` | Safety limit. Real hierarchies are 2–4 levels deep; rarely needs changing. |
 
-### `get_smart_checklist` — just the ACCs for one ticket
-
-Standalone, token-efficient — fetches only the Smart Checklist (Acceptance Criteria / DoD) for a single ticket, no hierarchy walk, no description, no comments. Useful when the description says "See ACCs" and you just want the list, or when the LLM is already in a deep conversation and you want to add only the criteria for one ticket without ballooning context.
-
-Example prompts:
-
-- _"Pull the ACCs for PROJ-1234"_
-- _"What's on the Smart Checklist of PROJ-1234?"_
-- _"Show acceptance criteria for PROJ-1234"_
+**`get_smart_checklist`**
 
 | Parameter | Type | Default | Notes |
 |---|---|---|---|
-| `issue_key` | string | required | e.g. `"PROJ-1234"` |
+| `issue_key` | string | required | Single ticket. |
 
-Output is one of:
+### Example prompts
 
-- `# Smart Checklist: PROJ-1234 (N items)` (or `(N/M done)` once items are completed), followed by section headers (`## 1. ...`, `## 2. ...`) and the items rendered as a markdown task list — when items exist
-- `Smart Checklist on PROJ-1234: empty (...)` — plugin active, zero items
-- `Smart Checklist on PROJ-1234: not present (...)` — plugin not installed or ticket doesn't use it
-- `Error: ...` — auth, rate limit, or config failure
+The LLM picks the right tool based on what you ask:
 
-Items render with their canonical markers: `[x]` done, `[ ]` open, `[-]` in progress, `[~]` skipped. The modern Smart Checklist format (v3+, common on current Atlassian Cloud instances) stores per-item status in sibling Jira properties that this tool doesn't read yet, so for those checklists every item shows as `[ ]` even when some are completed in the Jira UI — the count in the header still reflects the total. Legacy markers carried inline in the markdown are honored as-is.
+- _"Show me the tree around PROJ-1234"_ → `get_issue_tree`
+- _"What's in this epic? PROJ-100"_ → `get_issue_tree(depth_down=2)`
+- _"Tell me about PROJ-240"_ → `get_ticket_content`
+- _"Show me PROJ-240 with comments"_ → `get_ticket_content(include_comments=True)`
+- _"What are the ACCs for PROJ-240?"_ → `get_smart_checklist`
+- _"Walk me through this hierarchy with full descriptions of the parents"_ → `get_issue_tree` followed by `get_ticket_content` on each parent
 
-> Note: `get_ticket_context` already includes the Smart Checklist for every ticket on the path. Use `get_smart_checklist` only when you specifically want **just** the checklist of one ticket without the surrounding context.
+### Errors
 
-### Errors the tool can return
+All errors come back as the tool response (a string starting with `Error:`) rather than exceptions:
 
-All errors come back as the tool response (a string starting with `Error:`) rather than exceptions, so the LLM can reason about them:
-
-- `Error: missing required environment variable(s): ...` — one or more of `JIRA_BASE_URL` / `JIRA_EMAIL` / `JIRA_API_TOKEN` not provided
+- `Error: missing required environment variable(s): ...` — credentials not provided
 - `Error: invalid Jira configuration — ...` — env vars are set but malformed (e.g. base URL isn't a valid URL)
-- `Error: Jira authentication failed. ...` — wrong email/token (or whitespace polluting the token, see the heads-up note above)
-- `Error: ticket(s) not found in Jira: PROJ-1234` — typo, deleted, or your token lacks access to the project
+- `Error: Jira authentication failed. ...` — wrong email/token (or whitespace polluting the token)
+- `Error: ticket(s) not found in Jira: PROJ-1234` — typo, deleted, or your token lacks access
 - `Error: Jira rate limit exceeded after retries. ...` — back off and retry
-- `Error: invalid max_depth parameter. ...` — `max_depth` was `< 1`
+- `Error: invalid depth parameter. ...` — `depth_up` was `< 1`
 - `Error: hierarchy cycle detected. ...` — parent link loop in Jira (shouldn't happen, but defensive)
 
 ### From the shell (no MCP client needed)
 
-The tool is a plain async Python function — you can call it directly with `uv run` and get the exact same markdown that an LLM would receive. Useful for debugging, ad-hoc reading, piping into other tools, or scripting.
-
-All snippets below assume you're in the repo root and have `.env` filled in (or that `JIRA_*` env vars are exported). Output is whatever the tool returns — either the markdown render or an `Error: ...` line.
-
-**Fetch a single ticket (the common case):**
+Each tool is an async Python function — call it directly with `uv run`:
 
 ```bash
+# Tree overview
 uv run python -c "
 import asyncio
-from jira_context_mcp.server import get_ticket_context
-print(asyncio.run(get_ticket_context(issue_key='PROJ-1234')))
+from jira_context_mcp.server import get_issue_tree
+print(asyncio.run(get_issue_tree(issue_key='PROJ-1234')))
 "
-```
 
-**Include comments:**
-
-```bash
+# Single ticket full content
 uv run python -c "
 import asyncio
-from jira_context_mcp.server import get_ticket_context
-print(asyncio.run(get_ticket_context(issue_key='PROJ-1234', include_comments=True)))
+from jira_context_mcp.server import get_ticket_content
+print(asyncio.run(get_ticket_content(issue_key='PROJ-1234', include_comments=True)))
 "
-```
 
-**Just the ACCs (no hierarchy)** — uses the standalone `get_smart_checklist` tool, much smaller output:
-
-```bash
+# Just the ACCs
 uv run python -c "
 import asyncio
 from jira_context_mcp.server import get_smart_checklist
@@ -231,115 +231,42 @@ print(asyncio.run(get_smart_checklist(issue_key='PROJ-1234')))
 "
 ```
 
-**Narrow walk — only the ticket and its direct parent** (handy for sanity-checking parent links without pulling the whole chain):
+Save to a file:
 
 ```bash
 uv run python -c "
 import asyncio
-from jira_context_mcp.server import get_ticket_context
-print(asyncio.run(get_ticket_context(issue_key='PROJ-1234', max_depth=2)))
+from jira_context_mcp.server import get_issue_tree
+print(asyncio.run(get_issue_tree(issue_key='PROJ-1234')))
+" > PROJ-1234-tree.md
+```
+
+Pipe through a markdown pager like [`glow`](https://github.com/charmbracelet/glow):
+
+```bash
+uv run python -c "..." | glow -
+```
+
+Quick connectivity / auth check (any tool works; `get_smart_checklist` is the lightest):
+
+```bash
+uv run python -c "
+import asyncio
+from jira_context_mcp.server import get_smart_checklist
+print(asyncio.run(get_smart_checklist(issue_key='DEFINITELY-BOGUS-9999')))
 "
-```
-
-**Save the render to a file** for later reference or to paste into a PR description:
-
-```bash
-uv run python -c "
-import asyncio
-from jira_context_mcp.server import get_ticket_context
-print(asyncio.run(get_ticket_context(issue_key='PROJ-1234', include_comments=True)))
-" > PROJ-1234.md
-```
-
-**Pipe through a markdown pager** like [`glow`](https://github.com/charmbracelet/glow) for a rendered view in the terminal:
-
-```bash
-uv run python -c "
-import asyncio
-from jira_context_mcp.server import get_ticket_context
-print(asyncio.run(get_ticket_context(issue_key='PROJ-1234')))
-" | glow -
-```
-
-Or plain `less`:
-
-```bash
-uv run python -c "..." | less -R
-```
-
-**Ad-hoc credentials** (override `.env` for a single call, e.g. testing against a second instance):
-
-```bash
-JIRA_BASE_URL=https://other-org.atlassian.net \
-JIRA_EMAIL=you@example.com \
-JIRA_API_TOKEN=ATATT... \
-uv run python -c "
-import asyncio
-from jira_context_mcp.server import get_ticket_context
-print(asyncio.run(get_ticket_context(issue_key='OTHER-42')))
-"
-```
-
-**Batch several tickets** in one process (reuses the event loop, so it's faster than calling the script N times):
-
-```bash
-uv run python -c "
-import asyncio
-from jira_context_mcp.server import get_ticket_context
-
-async def main():
-    for key in ['PROJ-1234', 'PROJ-1235', 'PROJ-2000']:
-        print(await get_ticket_context(issue_key=key, include_comments=False))
-        print('---\n')
-
-asyncio.run(main())
-"
-```
-
-**Quick connectivity / auth check** — if creds are wrong you'll get `Error: Jira authentication failed ...`; if OK you'll get `Error: ticket(s) not found in Jira: DEFINITELY-BOGUS-9999`:
-
-```bash
-uv run python -c "
-import asyncio
-from jira_context_mcp.server import get_ticket_context
-print(asyncio.run(get_ticket_context(issue_key='DEFINITELY-BOGUS-9999')))
-"
-```
-
-**Extract just one section** from the output — e.g. grab only the entry ticket's Smart Checklist:
-
-```bash
-uv run python -c "
-import asyncio
-from jira_context_mcp.server import get_ticket_context
-print(asyncio.run(get_ticket_context(issue_key='PROJ-1234')))
-" | awk '/^## 🎯 /,0' | sed -n '/### Smart Checklist/,/^### /{/^### [^S]/q;p}'
-```
-
-**Shell alias** for the common case — add to `~/.zshrc` / `~/.bashrc`:
-
-```bash
-jctx() {
-  uv run --directory /absolute/path/to/jira-context-mcp python -c "
-import asyncio, sys
-from jira_context_mcp.server import get_ticket_context
-print(asyncio.run(get_ticket_context(issue_key=sys.argv[1], include_comments='$2' == '--comments')))
-" "$1" "$2"
-}
-
-# usage:
-#   jctx PROJ-1234
-#   jctx PROJ-1234 --comments
+# Wrong creds → "Error: Jira authentication failed ..."
+# OK creds  → "Smart Checklist on DEFINITELY-BOGUS-9999: not present (...)"
 ```
 
 ## Known limitations
 
 - **Comments:** capped at 100 per ticket. If a ticket has more, a WARN is logged to stderr and the first 100 are returned.
-- **Jira Cloud only.** No Jira Server / Data Center support in v0.1.
+- **Jira Cloud only.** No Jira Server / Data Center support.
 - **Read-only by design.** No `create_*`, `update_*`, `transition_*` tools — this is intentional.
-- **Smart Checklist progress:** for the modern bullet-list format, per-item status lives in sibling Jira properties (`SmartChecklist`, `ItemStatusSearchMeta`) that the parser doesn't currently read. Every item defaults to "open" in the output, so the header shows `(N items)` even when some are completed in the Jira UI. Legacy task-list markers carried inline (`[x]`, `[-]`, `[~]`) are honored when present. Reading the sibling properties for accurate progress is on the roadmap.
-- **ADF coverage:** the converter handles paragraphs, headings (auto-shifted to nest under the surrounding hierarchy), lists (bullet/ordered, nested), code blocks, blockquotes, marks (`strong`/`em`/`code`/`strike`/`link`), hard breaks, mentions, emoji, inline cards (URL extraction), media nodes (`[image]` placeholder), and horizontal rules. Two rarer types — `panel` (info/note/warning callouts) and `table` — still render as `[unsupported: <type>]` so nothing is silently dropped; add a handler in `src/jira_context_mcp/adf.py` if you need them.
-- **Subtasks of the entry ticket** are not fetched. The traversal walks **up** to the root and pulls each path-node's siblings, but the entry ticket is treated as a leaf — its children (if any) don't appear in the Issue tree. If you need them, ask for the parent's context instead.
+- **Smart Checklist progress:** for the modern bullet-list format, per-item status lives in sibling Jira properties (`SmartChecklist`, `ItemStatusSearchMeta`) that the parser doesn't currently read. Items default to `"open"`, so the count shows `(N items)` even when some are completed in Jira UI. Legacy task-list markers carried inline (`[x]`, `[-]`, `[~]`) are honored when present. Reading the sibling properties for accurate `(N/M done)` is on the roadmap.
+- **`depth_down` is capped at 3.** Asking for more is silently clamped. The focus ticket and its direct ancestors are always reachable in the tree, even when the focus sits below `depth_down` levels (the spine is always expanded).
+- **ADF coverage:** the converter handles paragraphs, headings (auto-shifted to nest under the surrounding hierarchy in `get_ticket_content`), lists, code blocks, blockquotes, marks (`strong`/`em`/`code`/`strike`/`link`), hard breaks, mentions, emoji, inline cards (URL extraction), media nodes (`[image]` placeholder), and horizontal rules. Two rarer types — `panel` and `table` — still render as `[unsupported: <type>]`; add a handler in `src/jira_context_mcp/adf.py` if you need them.
 
 ## Development
 
@@ -351,21 +278,27 @@ cp .env.example .env  # then edit
 uv run python -m jira_context_mcp  # stdio server — blocks waiting for MCP handshake
 ```
 
-For ad-hoc tool calls without running the full MCP server, see [From the shell](#from-the-shell-no-mcp-client-needed) above.
+Run the test suite, linter, and type checker:
+
+```bash
+uv run pytest          # 171 tests, ~1s
+uv run ruff check src tests
+uv run mypy
+```
 
 Project layout:
 
 ```
 src/jira_context_mcp/
 ├── __init__.py
-├── __main__.py       # uvx / python -m entrypoint
-├── server.py         # FastMCP server + tool registration
+├── __main__.py       # python -m entrypoint
+├── server.py         # FastMCP server + 3 tool registrations
 ├── config.py         # pydantic-settings for env vars
-├── models.py         # frozen pydantic DTOs
+├── models.py         # frozen pydantic DTOs (Ticket, Comment, Checklist, TreeNode, ...)
 ├── jira.py           # async httpx client + retries + checklist parser
-├── context.py        # two-phase hierarchy traversal
-├── adf.py            # ADF → markdown converter
-└── markdown.py       # final renderer
+├── tree.py           # walk-up + walk-down hierarchy builder
+├── adf.py            # ADF → markdown converter (with heading_offset)
+└── markdown.py       # final renderers (tree, content, checklist)
 ```
 
 ## License

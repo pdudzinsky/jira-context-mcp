@@ -1,0 +1,43 @@
+# Run ``pre-commit install`` once per clone to wire these into git.
+# After that, every ``git commit`` runs ruff (lint + format) and mypy
+# locally before the commit lands — same checks CI runs on push, just
+# faster feedback.
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Pin to the version we develop against; bump together with the
+    # ruff entry in pyproject.toml's [dependency-groups] dev list.
+    rev: v0.15.12
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.18.2
+    hooks:
+      - id: mypy
+        # mypy needs the project's runtime deps to type-check accurately
+        # (pydantic, httpx, fastmcp). pre-commit creates an isolated venv
+        # per hook by default — ``additional_dependencies`` plumbs them in.
+        additional_dependencies:
+          - "pydantic>=2.6.0"
+          - "pydantic-settings>=2.2.0"
+          - "httpx>=0.27.0"
+          - "fastmcp>=3.0.0"
+        args: [--config-file=pyproject.toml]
+        # Only check the package source; tests have their own conventions
+        # (heavy use of fixtures, # type: ignore[arg-type] for fake clients)
+        # that don't need to gate every commit.
+        files: ^src/
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=2000]

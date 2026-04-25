@@ -297,10 +297,21 @@ uv run python -m jira_context_mcp  # stdio server — blocks waiting for MCP han
 Run the test suite, linter, and type checker:
 
 ```bash
-uv run pytest          # 171 tests, ~1s
-uv run ruff check src tests
-uv run mypy
+uv run pytest                       # 171 tests, ~1s
+uv run ruff check src tests         # lint
+uv run ruff format src tests        # format (auto-applies)
+uv run ruff format --check src tests  # format check (CI-style)
+uv run mypy                         # type check
 ```
+
+Optional: enable pre-commit hooks so the same checks run locally on `git commit`. Install once per clone:
+
+```bash
+uv tool install pre-commit          # or pipx, brew, ...
+pre-commit install                  # writes .git/hooks/pre-commit
+```
+
+Configured hooks (`.pre-commit-config.yaml`): `ruff check --fix`, `ruff format`, `mypy` (on `src/`), plus standard `pre-commit-hooks` (trailing whitespace, end-of-file, YAML/TOML validity, merge conflicts, large files).
 
 Project layout:
 

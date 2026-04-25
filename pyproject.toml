@@ -40,6 +40,7 @@ jira-context-mcp = "jira_context_mcp.__main__:main"
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "pytest-cov>=5.0.0",
     "respx>=0.21.0",
 ]
 
@@ -54,6 +55,18 @@ packages = ["src/jira_context_mcp"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src"]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["src/jira_context_mcp"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]
 
 [tool.ruff]
 line-length = 100

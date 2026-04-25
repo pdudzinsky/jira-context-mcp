@@ -4,7 +4,7 @@ Pull rich Jira ticket context into your LLM during development. One MCP call ret
 
 ## What you get
 
-Given a single ticket key, the tool walks up the parent chain to the root (Epic/Initiative), and for each ticket on the path fetches description, Smart Checklist, peer tickets (children of the parent), and optionally comments. The entry ticket is visually marked so the LLM knows where you are in the hierarchy.
+Given a single ticket key, the tool walks up the parent chain to the root (Epic/Initiative), and for each ticket on the path fetches description, Smart Checklist (rendered when the ticket actually has items), peer tickets at the same level, and optionally comments. The entry ticket is visually marked so the LLM knows where you are in the hierarchy.
 
 Simplified sample output for `PROJ-1234`:
 
@@ -35,7 +35,8 @@ PROJ-100 · [Epic] Refactor billing module · In Progress
 ### Description
 Decompose the monolithic billing service into domain-aligned services.
 
-### Smart Checklist
+### Smart Checklist (3 items)
+#### 1. Service alignment
 - [x] Service boundary alignment reviewed
 - [-] Migration plan drafted
 - [ ] Rollout communication to support
@@ -48,16 +49,18 @@ Decompose the monolithic billing service into domain-aligned services.
 ### Description
 Pull invoice logic out of BillingService into a new InvoiceService.
 
-### Smart Checklist
-_(no checklist)_
-
 ---
 
 ## 🎯 PROJ-1234 · [Task] Add PDF template for invoices ⬅️ ENTRY
 ...
 ````
 
-The top-of-document `Issue tree` gives the full hierarchy at a glance — root at the top, path nodes prefixed with `→`, the entry ticket with 🎯 + `⬅️ ENTRY`, and all peers at each level shown in the order Jira returned them (approximately by rank). The per-ticket sections below carry the full description, Smart Checklist, and optionally comments.
+A few things to note in this layout:
+
+- The top-of-document `Issue tree` gives the full hierarchy at a glance — root at the top, path nodes prefixed with `→`, the entry ticket with 🎯 + `⬅️ ENTRY`, and all peers at each level shown in the order Jira returned them (approximately by rank).
+- Each per-ticket section carries the description and (when present) a Smart Checklist; tickets without a checklist simply omit the section instead of rendering an empty placeholder, so the output stays focused on tickets that have ACCs (e.g. `PROJ-240` above).
+- Smart Checklist sections preserve the grouping from Jira (`#### 1. ...`, `#### 2. ...`) and the header carries an at-a-glance count (`(3 items)` or `(N/M done)` once items are completed).
+- Comments are opt-in via `include_comments=True`; when on, each ticket on the path gets a `### Comments` block with comment dates, authors, and bodies as blockquotes.
 
 ## Prerequisites
 
@@ -162,10 +165,12 @@ Example prompts:
 
 Output is one of:
 
-- `# Smart Checklist: PROJ-1234` followed by a markdown task list (`[x]`, `[ ]`, `[-]`, `[~]`) — when items exist
+- `# Smart Checklist: PROJ-1234 (N items)` (or `(N/M done)` once items are completed), followed by section headers (`## 1. ...`, `## 2. ...`) and the items rendered as a markdown task list — when items exist
 - `Smart Checklist on PROJ-1234: empty (...)` — plugin active, zero items
 - `Smart Checklist on PROJ-1234: not present (...)` — plugin not installed or ticket doesn't use it
 - `Error: ...` — auth, rate limit, or config failure
+
+Items render with their canonical markers: `[x]` done, `[ ]` open, `[-]` in progress, `[~]` skipped. The modern Smart Checklist format (v3+, common on current Atlassian Cloud instances) stores per-item status in sibling Jira properties that this tool doesn't read yet, so for those checklists every item shows as `[ ]` even when some are completed in the Jira UI — the count in the header still reflects the total. Legacy markers carried inline in the markdown are honored as-is.
 
 > Note: `get_ticket_context` already includes the Smart Checklist for every ticket on the path. Use `get_smart_checklist` only when you specifically want **just** the checklist of one ticket without the surrounding context.
 
@@ -173,11 +178,12 @@ Output is one of:
 
 All errors come back as the tool response (a string starting with `Error:`) rather than exceptions, so the LLM can reason about them:
 
-- `Error: missing required environment variable(s): ...` — credentials not provided
-- `Error: Jira authentication failed. ...` — wrong email/token
-- `Error: ticket(s) not found in Jira: PROJ-1234` — typo, deleted, or your token lacks access
+- `Error: missing required environment variable(s): ...` — one or more of `JIRA_BASE_URL` / `JIRA_EMAIL` / `JIRA_API_TOKEN` not provided
+- `Error: invalid Jira configuration — ...` — env vars are set but malformed (e.g. base URL isn't a valid URL)
+- `Error: Jira authentication failed. ...` — wrong email/token (or whitespace polluting the token, see the heads-up note above)
+- `Error: ticket(s) not found in Jira: PROJ-1234` — typo, deleted, or your token lacks access to the project
 - `Error: Jira rate limit exceeded after retries. ...` — back off and retry
-- `Error: invalid max_depth parameter. ...` — `max_depth` was < 1
+- `Error: invalid max_depth parameter. ...` — `max_depth` was `< 1`
 - `Error: hierarchy cycle detected. ...` — parent link loop in Jira (shouldn't happen, but defensive)
 
 ### From the shell (no MCP client needed)
@@ -322,7 +328,9 @@ print(asyncio.run(get_ticket_context(issue_key=sys.argv[1], include_comments='$2
 - **Comments:** capped at 100 per ticket. If a ticket has more, a WARN is logged to stderr and the first 100 are returned.
 - **Jira Cloud only.** No Jira Server / Data Center support in v0.1.
 - **Read-only by design.** No `create_*`, `update_*`, `transition_*` tools — this is intentional.
-- **ADF coverage:** the converter handles the common nodes (paragraph, headings, lists, code blocks, blockquote, marks, mentions, emoji). Rarer types (`mediaSingle`, `table`, `panel`, `inlineCard`, `rule`) render as `[unsupported: <type>]` so nothing is silently dropped — add a handler in `src/jira_context_mcp/adf.py` if you need one.
+- **Smart Checklist progress:** for the modern bullet-list format, per-item status lives in sibling Jira properties (`SmartChecklist`, `ItemStatusSearchMeta`) that the parser doesn't currently read. Every item defaults to "open" in the output, so the header shows `(N items)` even when some are completed in the Jira UI. Legacy task-list markers carried inline (`[x]`, `[-]`, `[~]`) are honored when present. Reading the sibling properties for accurate progress is on the roadmap.
+- **ADF coverage:** the converter handles paragraphs, headings (auto-shifted to nest under the surrounding hierarchy), lists (bullet/ordered, nested), code blocks, blockquotes, marks (`strong`/`em`/`code`/`strike`/`link`), hard breaks, mentions, emoji, inline cards (URL extraction), media nodes (`[image]` placeholder), and horizontal rules. Two rarer types — `panel` (info/note/warning callouts) and `table` — still render as `[unsupported: <type>]` so nothing is silently dropped; add a handler in `src/jira_context_mcp/adf.py` if you need them.
+- **Subtasks of the entry ticket** are not fetched. The traversal walks **up** to the root and pulls each path-node's siblings, but the entry ticket is treated as a leaf — its children (if any) don't appear in the Issue tree. If you need them, ask for the parent's context instead.
 
 ## Development
 

@@ -1,0 +1,62 @@
+name: Bug report
+description: Report something not working as expected
+labels: ["bug"]
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. The more specific you are,
+        the faster I can fix it.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One-sentence summary of what's wrong.
+      placeholder: "get_issue_tree returns 'auth error' even with a valid token"
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: |
+        - Python version (`python --version`)
+        - `jira-context-mcp` version (`pip show jira-context-mcp` or commit SHA)
+        - MCP client (e.g. Claude Code, Claude Desktop, custom)
+        - Jira flavor (Cloud / Server / Data Center)
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: A list of steps that reliably reproduces the problem.
+      placeholder: |
+        1. Configure JIRA_URL / JIRA_EMAIL / JIRA_API_TOKEN
+        2. Call `get_issue_tree(issue_key="PROJ-100")`
+        3. Observe …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual behavior
+      description: What did you expect to happen, and what happened instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / stack trace
+      description: |
+        Relevant logs from the MCP server (stderr) or the calling client.
+        Redact tokens / private ticket content before pasting.
+      render: shell
+    validations:
+      required: false

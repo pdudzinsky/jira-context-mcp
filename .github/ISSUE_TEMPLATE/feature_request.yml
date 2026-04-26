@@ -1,0 +1,30 @@
+name: Feature request
+description: Suggest a new feature or enhancement
+labels: ["enhancement"]
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What
+      description: What feature or enhancement do you want?
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: |
+        What problem does this solve? A concrete use case ("I'm doing X and Y blocks me")
+        beats an abstract argument.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Workarounds
+      description: Are there existing workarounds? If yes, what makes them insufficient?
+    validations:
+      required: false

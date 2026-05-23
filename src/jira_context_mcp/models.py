@@ -74,13 +74,47 @@ class Comment(_Frozen):
         return value
 
 
+class Attachment(_Frozen):
+    """A file attached to a Jira issue.
+
+    ``content_url`` is the authenticated download URL Jira returns in the
+    ``attachment.content`` field. Fetching it requires the same BasicAuth
+    used by :class:`JiraClient`; surface it to readers via the renderer
+    only as informational metadata, not as a click-through link.
+
+    ``embedded`` is ``True`` when this file is referenced by a media node
+    inside the surrounding ticket's description (i.e. someone pasted it
+    into the body). When ``False`` the file is "orphan" — uploaded but
+    not mentioned anywhere in the prose. The renderer surfaces this so
+    the LLM can prioritise: embedded files are part of the narrative,
+    orphans are usually post-review revisions or supplementary material.
+    """
+
+    id: str
+    filename: str
+    mime_type: str
+    size: int
+    created: datetime
+    author: str
+    content_url: str
+    embedded: bool = False
+
+    @field_validator("created")
+    @classmethod
+    def _require_tz(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("Attachment.created must be timezone-aware")
+        return value
+
+
 class Ticket(_Frozen):
     """A single Jira issue with the fields needed by every renderer.
 
     ``description_md`` is the markdown form of the ADF body (``None`` when
     the Jira field is empty). ``parent_key`` drives the root-ward traversal
     of :class:`build_issue_tree`; ``url`` is precomputed so renderers stay
-    concatenation-free.
+    concatenation-free. ``attachments`` is a tuple (immutable, frozen-safe)
+    that defaults to empty so existing call sites stay source-compatible.
     """
 
     key: str
@@ -91,6 +125,7 @@ class Ticket(_Frozen):
     description_md: str | None
     parent_key: str | None
     url: str
+    attachments: tuple[Attachment, ...] = ()
 
 
 class TreeNode(_Frozen):

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections import Counter
 
-from .models import Checklist, ChecklistItem, Comment, Ticket, TreeNode
+from .models import Attachment, Checklist, ChecklistItem, Comment, Ticket, TreeNode
 
 _STATUS_MARKER: dict[str, str] = {
     "open": "[ ]",
@@ -205,10 +205,58 @@ def render_ticket_content(
             ]
         )
 
+    if ticket.attachments:
+        lines.extend(["", render_attachments(ticket.attachments)])
+
     if include_comments:
         lines.extend(["", "## Comments", *_render_comments_body(comments)])
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+# ---------- Attachments ----------
+
+
+def render_attachments(attachments: tuple[Attachment, ...] | list[Attachment]) -> str:
+    """Render a ticket's attachments as a ``## Attachments`` markdown section.
+
+    Each file gets one line with everything the LLM needs to decide whether
+    to fetch it: id (key for ``get_ticket_attachment``), filename, mime type,
+    human-readable size, creation date, author, and an ``embedded`` /
+    ``orphan`` marker indicating whether the file is referenced from the
+    description prose (embedded — part of the narrative, priority) or just
+    attached without mention (orphan — usually post-review revisions or
+    supplementary material).
+
+    Returns an empty string when ``attachments`` is empty so callers can
+    treat the result as concatenable without a presence check.
+    """
+    if not attachments:
+        return ""
+    lines = ["## Attachments"]
+    for a in attachments:
+        date_str = a.created.strftime("%Y-%m-%d")
+        status = "embedded" if a.embedded else "orphan"
+        lines.append(
+            f"- [{a.id}] {a.filename} · {a.mime_type} · "
+            f"{_format_size(a.size)} · {date_str} by {a.author} · {status}"
+        )
+    return "\n".join(lines)
+
+
+def _format_size(size_bytes: int) -> str:
+    """Format a byte count as B / KB / MB with at most one decimal place.
+
+    Informational only — the renderer never compares this string against
+    the size cap. Cap enforcement always works on raw bytes in the Jira
+    client (``download_attachment``) and the server tool, both of which
+    operate on the unrounded ``attachment.size`` integer.
+    """
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.0f} KB"
+    return f"{size_bytes / (1024 * 1024):.1f} MB"
 
 
 def _render_comments_body(comments: list[Comment]) -> list[str]:

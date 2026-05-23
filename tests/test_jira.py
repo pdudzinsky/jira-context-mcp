@@ -10,6 +10,7 @@ import pytest
 import respx
 
 from jira_context_mcp.jira import (
+    JiraAttachmentTooLargeError,
     JiraAuthError,
     JiraClient,
     JiraError,
@@ -406,3 +407,359 @@ class TestHeaders:
                 await client.get_ticket("FOO-1")
         request = route.calls.last.request
         assert request.headers.get("authorization", "").startswith("Basic ")
+
+
+# ===================================================================
+# Attachments parsing in _to_ticket and download_attachment lifecycle
+# ===================================================================
+
+
+def _attachment_payload(
+    att_id: str = "12345",
+    *,
+    filename: str = "design.png",
+    mime_type: str = "image/png",
+    size: int = 4096,
+    created: str = "2026-05-12T10:00:00+00:00",
+    author: str = "Jane Doe",
+    content_url: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": att_id,
+        "filename": filename,
+        "mimeType": mime_type,
+        "size": size,
+        "created": created,
+        "author": {"displayName": author},
+        "content": content_url
+        or f"https://example.atlassian.net/rest/api/3/attachment/content/{att_id}",
+    }
+
+
+@pytest.mark.usefixtures("no_sleep")
+class TestAttachmentsParsing:
+    async def test_get_ticket_parses_attachments(self, client_factory, base_url: str) -> None:
+        payload = _ticket_payload("FOO-1")
+        payload["fields"]["attachment"] = [
+            _attachment_payload("12345"),
+            _attachment_payload("12346", filename="spec.pdf", mime_type="application/pdf"),
+        ]
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/issue/FOO-1").mock(
+                    return_value=httpx.Response(200, json=payload)
+                )
+                t = await client.get_ticket("FOO-1")
+        assert len(t.attachments) == 2
+        assert t.attachments[0].id == "12345"
+        assert t.attachments[0].filename == "design.png"
+        assert t.attachments[0].mime_type == "image/png"
+        assert t.attachments[0].size == 4096
+        assert t.attachments[0].author == "Jane Doe"
+        assert t.attachments[1].mime_type == "application/pdf"
+
+    async def test_get_ticket_skips_attachment_with_malformed_created(
+        self, client_factory, base_url: str
+    ) -> None:
+        payload = _ticket_payload("FOO-1")
+        payload["fields"]["attachment"] = [
+            _attachment_payload("1", created="not-a-date"),
+            _attachment_payload("2"),
+        ]
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/issue/FOO-1").mock(
+                    return_value=httpx.Response(200, json=payload)
+                )
+                t = await client.get_ticket("FOO-1")
+        assert [a.id for a in t.attachments] == ["2"]
+
+    async def test_get_ticket_skips_attachment_with_missing_id_or_content(
+        self, client_factory, base_url: str
+    ) -> None:
+        payload = _ticket_payload("FOO-1")
+        no_id = _attachment_payload("1")
+        no_id.pop("id")
+        no_content = _attachment_payload("2")
+        no_content.pop("content")
+        payload["fields"]["attachment"] = [no_id, no_content, _attachment_payload("3")]
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/issue/FOO-1").mock(
+                    return_value=httpx.Response(200, json=payload)
+                )
+                t = await client.get_ticket("FOO-1")
+        assert [a.id for a in t.attachments] == ["3"]
+
+    async def test_get_ticket_empty_or_missing_attachment_returns_empty_tuple(
+        self, client_factory, base_url: str
+    ) -> None:
+        payload = _ticket_payload("FOO-1")  # no attachment field
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/issue/FOO-1").mock(
+                    return_value=httpx.Response(200, json=payload)
+                )
+                t = await client.get_ticket("FOO-1")
+        assert t.attachments == ()
+
+    async def test_attachments_flagged_embedded_when_referenced_in_description(
+        self, client_factory, base_url: str
+    ) -> None:
+        """Attachment referenced from an ADF media node's attrs.alt -> embedded.
+        Attachment never mentioned in description -> orphan."""
+        payload = _ticket_payload("FOO-1")
+        payload["fields"]["description"] = {
+            "type": "doc",
+            "content": [
+                {
+                    "type": "mediaSingle",
+                    "content": [
+                        {
+                            "type": "media",
+                            "attrs": {"id": "ms-uuid", "alt": "design.png"},
+                        }
+                    ],
+                }
+            ],
+        }
+        payload["fields"]["attachment"] = [
+            _attachment_payload("100", filename="design.png"),
+            _attachment_payload("200", filename="appendix.png"),
+        ]
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/issue/FOO-1").mock(
+                    return_value=httpx.Response(200, json=payload)
+                )
+                t = await client.get_ticket("FOO-1")
+        by_id = {a.id: a for a in t.attachments}
+        assert by_id["100"].embedded is True
+        assert by_id["200"].embedded is False
+
+    async def test_embedded_flag_matches_via_uuid_suffix_normalisation(
+        self, client_factory, base_url: str
+    ) -> None:
+        """When Jira disambiguates filenames with ``(uuid)``, the embedded flag
+        must still resolve via the normalised form."""
+        payload = _ticket_payload("FOO-1")
+        payload["fields"]["description"] = {
+            "type": "doc",
+            "content": [
+                {
+                    "type": "mediaSingle",
+                    "content": [
+                        {
+                            "type": "media",
+                            "attrs": {"id": "ms-uuid", "alt": "search.png"},
+                        }
+                    ],
+                }
+            ],
+        }
+        payload["fields"]["attachment"] = [
+            _attachment_payload(
+                "1",
+                filename="search (c56f4a5c-e320-4a89-a130-66c61b01f5f5).png",
+            )
+        ]
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/issue/FOO-1").mock(
+                    return_value=httpx.Response(200, json=payload)
+                )
+                t = await client.get_ticket("FOO-1")
+        assert t.attachments[0].embedded is True
+
+    async def test_size_field_with_garbage_value_falls_back_to_zero(
+        self, client_factory, base_url: str
+    ) -> None:
+        """Non-numeric ``size`` shouldn't break parsing — we coerce to 0
+        and rely on the streaming download cap for protection."""
+        payload = _ticket_payload("FOO-1")
+        bad = _attachment_payload("1")
+        bad["size"] = "huge"  # garbage
+        payload["fields"]["attachment"] = [bad]
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/issue/FOO-1").mock(
+                    return_value=httpx.Response(200, json=payload)
+                )
+                t = await client.get_ticket("FOO-1")
+        assert t.attachments[0].size == 0
+
+    async def test_attachment_with_missing_created_is_skipped(
+        self, client_factory, base_url: str
+    ) -> None:
+        payload = _ticket_payload("FOO-1")
+        no_created = _attachment_payload("1")
+        no_created.pop("created")
+        payload["fields"]["attachment"] = [no_created, _attachment_payload("2")]
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/issue/FOO-1").mock(
+                    return_value=httpx.Response(200, json=payload)
+                )
+                t = await client.get_ticket("FOO-1")
+        assert [a.id for a in t.attachments] == ["2"]
+
+    async def test_attachment_with_naive_created_is_skipped(
+        self, client_factory, base_url: str
+    ) -> None:
+        payload = _ticket_payload("FOO-1")
+        naive = _attachment_payload("1", created="2026-05-12T10:00:00")  # no tz
+        payload["fields"]["attachment"] = [naive, _attachment_payload("2")]
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/issue/FOO-1").mock(
+                    return_value=httpx.Response(200, json=payload)
+                )
+                t = await client.get_ticket("FOO-1")
+        assert [a.id for a in t.attachments] == ["2"]
+
+    async def test_no_description_means_all_attachments_are_orphan(
+        self, client_factory, base_url: str
+    ) -> None:
+        payload = _ticket_payload("FOO-1")
+        payload["fields"]["attachment"] = [_attachment_payload("1")]
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/issue/FOO-1").mock(
+                    return_value=httpx.Response(200, json=payload)
+                )
+                t = await client.get_ticket("FOO-1")
+        assert t.attachments[0].embedded is False
+
+
+@pytest.mark.usefixtures("no_sleep")
+class TestDownloadAttachment:
+    CONTENT_URL = "https://example.atlassian.net/rest/api/3/attachment/content/12345"
+
+    async def test_happy_path_returns_bytes_and_mime(self, client_factory, base_url: str) -> None:
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/attachment/content/12345").mock(
+                    return_value=httpx.Response(
+                        200,
+                        content=b"PNGDATA",
+                        headers={"Content-Type": "image/png"},
+                    )
+                )
+                data, mime = await client.download_attachment(self.CONTENT_URL, max_bytes=1024)
+        assert data == b"PNGDATA"
+        assert mime == "image/png"
+
+    async def test_strips_charset_from_content_type(self, client_factory, base_url: str) -> None:
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/attachment/content/12345").mock(
+                    return_value=httpx.Response(
+                        200,
+                        content=b"hello",
+                        headers={"Content-Type": "text/plain; charset=utf-8"},
+                    )
+                )
+                _, mime = await client.download_attachment(self.CONTENT_URL, max_bytes=1024)
+        assert mime == "text/plain"
+
+    async def test_content_length_exceeds_cap_raises_too_large(
+        self, client_factory, base_url: str
+    ) -> None:
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/attachment/content/12345").mock(
+                    return_value=httpx.Response(
+                        200,
+                        content=b"X" * 10,
+                        headers={"Content-Length": "10000000"},
+                    )
+                )
+                with pytest.raises(JiraAttachmentTooLargeError) as exc:
+                    await client.download_attachment(self.CONTENT_URL, max_bytes=100)
+        assert exc.value.size == 10000000
+        assert exc.value.max_bytes == 100
+
+    async def test_mid_stream_overflow_raises_too_large(
+        self, client_factory, base_url: str
+    ) -> None:
+        """When Content-Length is absent / lies, the accumulator must abort."""
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/attachment/content/12345").mock(
+                    return_value=httpx.Response(200, content=b"X" * 5000)
+                )
+                with pytest.raises(JiraAttachmentTooLargeError):
+                    await client.download_attachment(self.CONTENT_URL, max_bytes=1000)
+
+    async def test_401_raises_auth_error(self, client_factory, base_url: str) -> None:
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/attachment/content/12345").mock(
+                    return_value=httpx.Response(401)
+                )
+                with pytest.raises(JiraAuthError):
+                    await client.download_attachment(self.CONTENT_URL, max_bytes=1024)
+
+    async def test_404_raises_not_found(self, client_factory, base_url: str) -> None:
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/attachment/content/12345").mock(
+                    return_value=httpx.Response(404)
+                )
+                with pytest.raises(JiraNotFoundError):
+                    await client.download_attachment(self.CONTENT_URL, max_bytes=1024)
+
+    async def test_5xx_raises_jira_error(self, client_factory, base_url: str) -> None:
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/attachment/content/12345").mock(
+                    return_value=httpx.Response(500, content=b"oops")
+                )
+                with pytest.raises(JiraError):
+                    await client.download_attachment(self.CONTENT_URL, max_bytes=1024)
+
+    async def test_network_error_during_download_raises_jira_error(
+        self, client_factory, base_url: str
+    ) -> None:
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/attachment/content/12345").mock(
+                    side_effect=httpx.NetworkError("dns blew up")
+                )
+                with pytest.raises(JiraError):
+                    await client.download_attachment(self.CONTENT_URL, max_bytes=1024)
+
+    async def test_invalid_content_length_falls_through_to_streaming_cap(
+        self, client_factory, base_url: str
+    ) -> None:
+        """A non-numeric ``Content-Length`` shouldn't crash — the streaming
+        guard catches the overflow even if the metadata check is bypassed."""
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/attachment/content/12345").mock(
+                    return_value=httpx.Response(
+                        200, content=b"X" * 5000, headers={"Content-Length": "banana"}
+                    )
+                )
+                with pytest.raises(JiraAttachmentTooLargeError):
+                    await client.download_attachment(self.CONTENT_URL, max_bytes=1000)
+
+    async def test_redirect_followed(self, client_factory, base_url: str) -> None:
+        """Jira commonly 302s attachment downloads to a CDN."""
+        async with client_factory() as client:
+            with respx.mock(assert_all_called=False) as router:
+                router.get(self.CONTENT_URL).mock(
+                    return_value=httpx.Response(
+                        302,
+                        headers={"Location": "https://cdn.example.com/blob/12345"},
+                    )
+                )
+                router.get("https://cdn.example.com/blob/12345").mock(
+                    return_value=httpx.Response(
+                        200,
+                        content=b"REDIRECTED",
+                        headers={"Content-Type": "image/png"},
+                    )
+                )
+                data, _ = await client.download_attachment(self.CONTENT_URL, max_bytes=1024)
+        assert data == b"REDIRECTED"

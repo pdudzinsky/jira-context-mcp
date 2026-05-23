@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-23
+
+### Added
+- **Attachments support — `get_ticket_attachment` (4th MCP tool) plus attachment metadata in `get_ticket_content`.** When an LLM needs the actual contents of a design mockup, PDF spec, or log file uploaded to a ticket (rather than just the description text), it can now reach them through the same composable contract as the other tools.
+  - `get_ticket_content` now renders a `## Attachments` section listing every file on the ticket with its id, filename, mime type, size, creation date, author, and an `embedded` / `orphan` marker. The id is the action key — the LLM passes it to the next tool to fetch bytes. The marker tells the LLM whether the file is referenced from inside the description prose (`embedded` — part of the narrative, high priority) or merely attached without mention (`orphan` — typically post-review revisions or supplementary material).
+  - Embedded media nodes inside the description (ADF `mediaSingle` / `mediaGroup` / `media` / `mediaInline`) are now resolved against the attachment list and rendered as `[attachment: filename (id=...)]`. Resolution is primarily by **filename** (ADF carries the Atlassian Media Services UUID in `attrs.id` — which is *not* the Jira attachment id — but Jira fills `attrs.alt` with the original filename). When `alt` is missing, the resolver falls back to direct `attrs.id`-vs-Jira-id matching. The emitted placeholder always carries the Jira numeric id — the actionable key for `get_ticket_attachment`. Filenames that Jira has disambiguated with a UUID v4 suffix (e.g. `"foo (c56f4a5c-...).png"` for duplicates) are normalised back to their original form (`"foo.png"`) before lookup, so the match still recovers. Orphan media (no matchable filename or id) falls back to the original `[image]` placeholder.
+  - `get_ticket_attachment(issue_key, attachment_id)` returns the file as a native MCP payload: `image/*` → `ImageContent`, `application/pdf` → embedded resource (`BlobResourceContents`), `text/*` → markdown string with a small header. Anything else returns an explanatory error pointing at the original `content_url` for manual download.
+  - Size cap is configurable via `JIRA_ATTACHMENT_MAX_MB` env var (default `20`). Files exceeding the cap are refused before any bytes are pulled when `attachment.size` is known; otherwise an early `Content-Length` check and a streaming guard abort the download mid-flight, so the server never buffers an oversized payload.
+- New `Attachment` frozen DTO (`models.Attachment`); `Ticket.attachments` defaults to an empty tuple so all existing call sites stay source-compatible.
+- New `JiraAttachmentTooLargeError` exception (subclass of `JiraError`) carrying `size` and `max_bytes` so the MCP layer can format actionable user-facing messages.
+- `JIRA_ATTACHMENT_MAX_MB` setting on `Settings` (default `20`, validated `gt=0` so configuration mistakes — `0`, negative — fail loudly at startup rather than silently breaking every download).
+
+### Changed (internal)
+- Server.py was refactored to extract `_format_jira_errors` — a single dispatch helper that replaces the four near-identical per-tool `except*` chains. Tool bodies are now ~25 lines each (down from ~50) and error wording stays in lock-step across tools.
+- `get_ticket_attachment` dispatch lifts the `download_attachment` call out of the three per-mime branches; the unsupported-mime path now short-circuits *before* hitting the network instead of after.
+- ADF media node resolution: `adf_to_markdown`'s `attachments` parameter is now typed `Sequence[Attachment] | None` (not `Iterable`) because the lookup tables are built in two passes — a single-shot generator would be exhausted after the first.
+
 ### Changed (breaking)
 - **Replaced the monolithic `get_ticket_context` with a 3-tool composable architecture.** The server now exposes `get_issue_tree`, `get_ticket_content`, and `get_smart_checklist` — each answering a single, focused question. `get_ticket_context` is removed entirely (no consumers to migrate; the project was unreleased).
   - `get_issue_tree(issue_key, depth_up=10, depth_down=2)` — walks UP from the focus to the topmost reachable ancestor, then BFS DOWN expanding every node up to `depth_down` levels (clamped to 3) plus the spine to the focus regardless of depth. Lite per-ticket info (key, type, summary, status); the focus ticket carries a 🎯 + ⬅️ FOCUS marker. Output also carries an Overview aggregate with counts by type and status.

@@ -1,6 +1,6 @@
 [project]
 name = "jira-context-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Read-only MCP server that pulls rich Jira ticket context (parent hierarchy, siblings, Smart Checklist) into LLMs as structured markdown."
 readme = "README.md"
 requires-python = ">=3.11"

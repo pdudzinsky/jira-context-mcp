@@ -6,12 +6,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from jira_context_mcp.markdown import (
+    render_attachments,
     render_checklist,
     render_checklist_items,
     render_issue_tree,
     render_ticket_content,
 )
 from jira_context_mcp.models import (
+    Attachment,
     Checklist,
     ChecklistItem,
     ChecklistSection,
@@ -32,6 +34,7 @@ def make_ticket(
     parent_key: str | None = None,
     description_md: str | None = None,
     assignee: str | None = None,
+    attachments: tuple[Attachment, ...] = (),
 ) -> Ticket:
     return Ticket(
         key=key,
@@ -42,6 +45,29 @@ def make_ticket(
         description_md=description_md,
         parent_key=parent_key,
         url=f"https://example.atlassian.net/browse/{key}",
+        attachments=attachments,
+    )
+
+
+def _att(
+    att_id: str,
+    *,
+    filename: str = "file.png",
+    mime_type: str = "image/png",
+    size: int = 4096,
+    created: datetime | None = None,
+    author: str = "Jane",
+    embedded: bool = False,
+) -> Attachment:
+    return Attachment(
+        id=att_id,
+        filename=filename,
+        mime_type=mime_type,
+        size=size,
+        created=created or datetime(2026, 5, 12, tzinfo=UTC),
+        author=author,
+        content_url=f"https://example.atlassian.net/rest/api/3/attachment/content/{att_id}",
+        embedded=embedded,
     )
 
 
@@ -318,6 +344,76 @@ def test_render_ticket_content_renders_comment_with_blockquoted_body() -> None:
     out = render_ticket_content(t, checklist=None, comments=[c], include_comments=True)
     assert "**2026-04-22 14:05, Bob:**" in out
     assert "> line 1\n>\n> line 2" in out
+
+
+# ===================================================================
+# render_attachments
+# ===================================================================
+
+
+def test_render_attachments_empty_returns_empty_string() -> None:
+    assert render_attachments(()) == ""
+    assert render_attachments([]) == ""
+
+
+def test_render_attachments_renders_section_with_line_per_file() -> None:
+    items = [
+        _att("12345", filename="design.png", mime_type="image/png", size=412 * 1024),
+        _att("12346", filename="spec.pdf", mime_type="application/pdf", size=2_500_000),
+    ]
+    out = render_attachments(items)
+    assert "## Attachments" in out
+    assert "[12345] design.png · image/png · 412 KB · 2026-05-12 by Jane" in out
+    assert "[12346] spec.pdf · application/pdf · 2.4 MB · 2026-05-12 by Jane" in out
+
+
+def test_render_attachments_marks_embedded_and_orphan_explicitly() -> None:
+    items = [
+        _att("1", filename="in-body.png", embedded=True),
+        _att("2", filename="dangling.png", embedded=False),
+    ]
+    out = render_attachments(items)
+    assert "[1] in-body.png · image/png · 4 KB · 2026-05-12 by Jane · embedded" in out
+    assert "[2] dangling.png · image/png · 4 KB · 2026-05-12 by Jane · orphan" in out
+
+
+def test_render_attachments_small_file_uses_bytes() -> None:
+    items = [_att("1", size=512)]
+    out = render_attachments(items)
+    assert "· 512 B ·" in out
+
+
+def test_render_attachments_size_zero_renders_as_bytes() -> None:
+    out = render_attachments([_att("1", size=0)])
+    assert "· 0 B ·" in out
+
+
+def test_render_attachments_size_at_kb_boundary() -> None:
+    """1024 B is exactly 1 KB — must NOT render as bytes."""
+    out = render_attachments([_att("1", size=1024)])
+    assert "· 1 KB ·" in out
+
+
+def test_render_attachments_size_at_mb_boundary() -> None:
+    """1 MiB is exactly 1.0 MB — must NOT render as KB."""
+    out = render_attachments([_att("1", size=1024 * 1024)])
+    assert "· 1.0 MB ·" in out
+
+
+def test_render_ticket_content_includes_attachments_section() -> None:
+    t = make_ticket(
+        "FOO-1",
+        attachments=(_att("99", filename="mockup.png", mime_type="image/png", size=10_240),),
+    )
+    out = render_ticket_content(t, checklist=None, comments=[], include_comments=False)
+    assert "## Attachments" in out
+    assert "[99] mockup.png · image/png · 10 KB" in out
+
+
+def test_render_ticket_content_omits_attachments_when_empty() -> None:
+    t = make_ticket("FOO-1")
+    out = render_ticket_content(t, checklist=None, comments=[], include_comments=False)
+    assert "Attachments" not in out
 
 
 # ===================================================================

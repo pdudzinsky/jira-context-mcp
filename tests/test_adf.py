@@ -2,11 +2,30 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
-from jira_context_mcp.adf import adf_to_markdown
+from jira_context_mcp.adf import (
+    adf_to_markdown,
+    collect_media_filenames,
+    normalise_attachment_filename,
+)
+from jira_context_mcp.models import Attachment
+
+
+def _att(att_id: str, filename: str) -> Attachment:
+    """Build an Attachment with sane defaults for ADF resolution tests."""
+    return Attachment(
+        id=att_id,
+        filename=filename,
+        mime_type="image/png",
+        size=1024,
+        created=datetime(2026, 1, 1, tzinfo=UTC),
+        author="Jane",
+        content_url=f"https://x.atlassian.net/rest/api/3/attachment/content/{att_id}",
+    )
 
 
 def doc(*content: dict[str, Any]) -> dict[str, Any]:
@@ -281,6 +300,202 @@ def test_media_group_block_renders_image_placeholder() -> None:
 def test_media_inline_renders_image_placeholder_inline() -> None:
     out = adf_to_markdown(doc(para(text("see "), {"type": "mediaInline"})))
     assert out == "see [image]"
+
+
+# ---------- media + attachment resolution ----------
+
+
+def test_media_with_alt_matching_filename_resolves_by_filename() -> None:
+    """The normal path: ADF carries Atlassian Media UUID in attrs.id and the
+    real filename in attrs.alt. Lookup happens via alt -> attachment.id."""
+    media_block = {
+        "type": "mediaSingle",
+        "content": [
+            {
+                "type": "media",
+                "attrs": {
+                    "id": "076ea081-250e-4214-bca3-e6adebf268ed",
+                    "type": "file",
+                    "alt": "mockup.png",
+                },
+            }
+        ],
+    }
+    out = adf_to_markdown(doc(media_block), attachments=[_att("44416", "mockup.png")])
+    assert out == "[attachment: mockup.png (id=44416)]"
+
+
+def test_media_with_id_matching_jira_id_resolves_by_id_fallback() -> None:
+    """Defensive fallback: when attrs.alt is missing but attrs.id happens to
+    match a Jira numeric id (rare, but possible on older instances)."""
+    media_block = {
+        "type": "mediaSingle",
+        "content": [{"type": "media", "attrs": {"id": "uuid-1", "type": "file"}}],
+    }
+    out = adf_to_markdown(doc(media_block), attachments=[_att("uuid-1", "mockup.png")])
+    assert out == "[attachment: mockup.png (id=uuid-1)]"
+
+
+def test_bare_media_with_alt_resolves_to_filename() -> None:
+    media_block = {
+        "type": "media",
+        "attrs": {"id": "ms-uuid", "alt": "design.jpg", "type": "file"},
+    }
+    out = adf_to_markdown(doc(media_block), attachments=[_att("9999", "design.jpg")])
+    assert out == "[attachment: design.jpg (id=9999)]"
+
+
+def test_media_inline_with_alt_resolves_inline() -> None:
+    inline = {"type": "mediaInline", "attrs": {"id": "ms-uuid", "alt": "screenshot.png"}}
+    out = adf_to_markdown(
+        doc(para(text("see "), inline)),
+        attachments=[_att("123", "screenshot.png")],
+    )
+    assert out == "see [attachment: screenshot.png (id=123)]"
+
+
+def test_media_with_unknown_alt_and_id_falls_back_to_image_placeholder() -> None:
+    media_block = {
+        "type": "mediaSingle",
+        "content": [{"type": "media", "attrs": {"id": "ms-missing", "alt": "missing.png"}}],
+    }
+    out = adf_to_markdown(doc(media_block), attachments=[_att("999", "other.png")])
+    assert out == "[image]"
+
+
+def test_media_group_with_multiple_children_resolves_each_by_alt() -> None:
+    media_group = {
+        "type": "mediaGroup",
+        "content": [
+            {"type": "media", "attrs": {"id": "ms-a", "alt": "first.png"}},
+            {"type": "media", "attrs": {"id": "ms-b", "alt": "second.png"}},
+        ],
+    }
+    out = adf_to_markdown(
+        doc(media_group),
+        attachments=[_att("11", "first.png"), _att("22", "second.png")],
+    )
+    assert out == "[attachment: first.png (id=11)]\n[attachment: second.png (id=22)]"
+
+
+def test_media_without_attachments_arg_falls_back_to_image() -> None:
+    media_block = {
+        "type": "mediaSingle",
+        "content": [{"type": "media", "attrs": {"id": "ms", "alt": "any.png"}}],
+    }
+    assert adf_to_markdown(doc(media_block)) == "[image]"
+
+
+def test_media_with_no_id_and_no_alt_falls_back_to_image() -> None:
+    media_block = {
+        "type": "mediaSingle",
+        "content": [{"type": "media", "attrs": {}}],
+    }
+    out = adf_to_markdown(doc(media_block), attachments=[_att("any", "x.png")])
+    assert out == "[image]"
+
+
+def test_jira_uuid_duplicate_suffix_in_attachment_filename_still_resolves() -> None:
+    """Jira appends ``(uuid)`` to duplicate filenames; ADF alt stays clean.
+
+    Real-world case from RDGA-7217: the attachment filename was
+    ``"Communications - Search (c56f4a5c-e320-4a89-a130-66c61b01f5f5).png"``
+    but ``attrs.alt`` was ``"Communications - Search.png"``. The resolver
+    must normalise the suffix so the lookup recovers the id.
+    """
+    media_block = {
+        "type": "mediaSingle",
+        "content": [
+            {
+                "type": "media",
+                "attrs": {"id": "ms-uuid", "alt": "Communications - Search.png"},
+            }
+        ],
+    }
+    out = adf_to_markdown(
+        doc(media_block),
+        attachments=[
+            _att(
+                "44415",
+                "Communications - Search (c56f4a5c-e320-4a89-a130-66c61b01f5f5).png",
+            )
+        ],
+    )
+    assert out == "[attachment: Communications - Search.png (id=44415)]"
+
+
+# ---------- collect_media_filenames / normalise_attachment_filename ----------
+
+
+def test_collect_media_filenames_finds_alt_in_nested_media() -> None:
+    adf = doc(
+        para(text("intro")),
+        {
+            "type": "mediaSingle",
+            "content": [{"type": "media", "attrs": {"id": "ms-1", "alt": "a.png"}}],
+        },
+        {
+            "type": "mediaGroup",
+            "content": [
+                {"type": "media", "attrs": {"id": "ms-2", "alt": "b.png"}},
+                {"type": "media", "attrs": {"id": "ms-3", "alt": "c.png"}},
+            ],
+        },
+        para(text("see "), {"type": "mediaInline", "attrs": {"alt": "d.png"}}),
+    )
+    assert collect_media_filenames(adf) == {"a.png", "b.png", "c.png", "d.png"}
+
+
+def test_collect_media_filenames_returns_empty_for_none_and_non_dict() -> None:
+    assert collect_media_filenames(None) == set()
+    assert collect_media_filenames("string") == set()
+    assert collect_media_filenames(42) == set()
+
+
+def test_collect_media_filenames_skips_media_without_alt() -> None:
+    adf = doc({"type": "mediaSingle", "content": [{"type": "media", "attrs": {"id": "ms"}}]})
+    assert collect_media_filenames(adf) == set()
+
+
+def test_normalise_attachment_filename_strips_uuid_suffix() -> None:
+    raw = "design (c56f4a5c-e320-4a89-a130-66c61b01f5f5).png"
+    assert normalise_attachment_filename(raw) == "design.png"
+
+
+def test_normalise_attachment_filename_passthrough_when_no_suffix() -> None:
+    assert normalise_attachment_filename("design.png") == "design.png"
+    assert normalise_attachment_filename("report (v2).pdf") == "report (v2).pdf"
+
+
+def test_filename_with_parentheses_but_no_uuid_is_not_stripped() -> None:
+    """``"report (v2).pdf"`` must not be normalised — the pattern requires
+    a full UUID v4 inside the parentheses."""
+    media_block = {
+        "type": "mediaSingle",
+        "content": [{"type": "media", "attrs": {"id": "ms", "alt": "report.pdf"}}],
+    }
+    out = adf_to_markdown(
+        doc(media_block),
+        attachments=[_att("1", "report (v2).pdf")],
+    )
+    assert out == "[image]"  # no match -> fallback
+
+
+def test_alt_takes_precedence_over_id_when_both_match() -> None:
+    """If attrs.alt matches one attachment and attrs.id matches another,
+    alt wins — it's the more specific, content-aware signal."""
+    media_block = {
+        "type": "mediaSingle",
+        "content": [{"type": "media", "attrs": {"id": "1", "alt": "from-alt.png"}}],
+    }
+    out = adf_to_markdown(
+        doc(media_block),
+        attachments=[
+            _att("1", "from-id.png"),  # id-matched would point here
+            _att("99", "from-alt.png"),  # alt-matched should win
+        ],
+    )
+    assert out == "[attachment: from-alt.png (id=99)]"
 
 
 def test_rule_renders_horizontal_divider() -> None:

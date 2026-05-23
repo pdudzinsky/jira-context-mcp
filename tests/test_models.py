@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from jira_context_mcp.models import (
+    Attachment,
     Checklist,
     ChecklistItem,
     ChecklistSection,
@@ -141,3 +142,102 @@ def test_tree_node_nests_recursively(sample_ticket: Ticket) -> None:
 def test_tree_node_is_focus_default_false(sample_ticket: Ticket) -> None:
     n = TreeNode(ticket=sample_ticket, children=[])
     assert n.is_focus is False
+
+
+# ---------- Attachment ----------
+
+
+def test_attachment_constructs_with_required_fields() -> None:
+    a = Attachment(
+        id="12345",
+        filename="design.png",
+        mime_type="image/png",
+        size=4096,
+        created=datetime(2026, 5, 12, tzinfo=UTC),
+        author="Jane",
+        content_url="https://x.atlassian.net/rest/api/3/attachment/content/12345",
+    )
+    assert a.id == "12345"
+    assert a.size == 4096
+    assert a.embedded is False  # default
+
+
+def test_attachment_embedded_round_trip() -> None:
+    a = Attachment(
+        id="1",
+        filename="f.png",
+        mime_type="image/png",
+        size=0,
+        created=datetime(2026, 1, 1, tzinfo=UTC),
+        author="a",
+        content_url="https://x/y",
+        embedded=True,
+    )
+    assert a.embedded is True
+
+
+def test_attachment_naive_datetime_rejected() -> None:
+    with pytest.raises(ValidationError) as exc:
+        Attachment(
+            id="1",
+            filename="f",
+            mime_type="image/png",
+            size=0,
+            created=datetime(2026, 1, 1),
+            author="a",
+            content_url="https://x/y",
+        )
+    assert "timezone-aware" in str(exc.value)
+
+
+def test_attachment_is_frozen() -> None:
+    a = Attachment(
+        id="1",
+        filename="f",
+        mime_type="image/png",
+        size=0,
+        created=datetime(2026, 1, 1, tzinfo=UTC),
+        author="a",
+        content_url="https://x/y",
+    )
+    with pytest.raises(ValidationError):
+        a.filename = "other"  # type: ignore[misc]
+
+
+def test_ticket_attachments_default_is_empty_tuple() -> None:
+    t = Ticket(
+        key="A-1",
+        summary="s",
+        status="Open",
+        issue_type="Story",
+        assignee=None,
+        description_md=None,
+        parent_key=None,
+        url="https://x/browse/A-1",
+    )
+    assert t.attachments == ()
+
+
+def test_ticket_attachments_round_trip() -> None:
+    att = Attachment(
+        id="1",
+        filename="f.png",
+        mime_type="image/png",
+        size=10,
+        created=datetime(2026, 1, 1, tzinfo=UTC),
+        author="a",
+        content_url="https://x/y",
+    )
+    t = Ticket(
+        key="A-1",
+        summary="s",
+        status="Open",
+        issue_type="Story",
+        assignee=None,
+        description_md=None,
+        parent_key=None,
+        url="https://x/browse/A-1",
+        attachments=(att,),
+    )
+    assert len(t.attachments) == 1
+    assert t.attachments[0].filename == "f.png"

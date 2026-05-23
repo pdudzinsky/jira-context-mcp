@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import HttpUrl, SecretStr, TypeAdapter, field_validator
+from pydantic import Field, HttpUrl, SecretStr, TypeAdapter, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _HTTP_URL_ADAPTER: TypeAdapter[HttpUrl] = TypeAdapter(HttpUrl)
@@ -30,6 +30,10 @@ class Settings(BaseSettings):
 
     request_timeout: float = 30.0
     max_retries: int = 3
+    # ``gt=0`` rejects ``0`` (would refuse every attachment) and negative
+    # values (would mean "empty cap", i.e. accept anything regardless of
+    # size — surprising semantics that hide configuration mistakes).
+    jira_attachment_max_mb: int = Field(default=20, gt=0)
 
     @field_validator("jira_base_url", mode="after")
     @classmethod

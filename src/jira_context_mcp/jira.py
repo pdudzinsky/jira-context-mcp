@@ -22,9 +22,17 @@ from typing import Any, Final
 
 import httpx
 
-from .adf import adf_to_markdown
+from .adf import adf_to_markdown, collect_media_filenames, normalise_attachment_filename
 from .config import Settings
-from .models import Checklist, ChecklistItem, ChecklistSection, ChecklistStatus, Comment, Ticket
+from .models import (
+    Attachment,
+    Checklist,
+    ChecklistItem,
+    ChecklistSection,
+    ChecklistStatus,
+    Comment,
+    Ticket,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,13 +61,40 @@ class JiraRateLimitError(JiraError):
     """Rate limit could not be cleared within the configured retry budget."""
 
 
-_USER_AGENT: Final = "jira-context-mcp/0.1.0 (+https://github.com/pdudzinsky/jira-context-mcp)"
+class JiraAttachmentTooLargeError(JiraError):
+    """Attachment exceeds the configured download size cap.
+
+    ``size`` and ``max_bytes`` (when set) let callers format an actionable
+    user-facing message — the MCP server surfaces them in the tool response.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        size: int | None = None,
+        max_bytes: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.size = size
+        self.max_bytes = max_bytes
+
+
+_USER_AGENT: Final = "jira-context-mcp/0.2.0 (+https://github.com/pdudzinsky/jira-context-mcp)"
 _DEFAULT_HEADERS: Final[dict[str, str]] = {
     "Accept": "application/json",
     "User-Agent": _USER_AGENT,
 }
 _CHECKLIST_PROPERTY: Final = "com.railsware.SmartChecklist.checklist"
-_TICKET_FIELDS: Final = ["summary", "status", "issuetype", "assignee", "description", "parent"]
+_TICKET_FIELDS: Final = [
+    "summary",
+    "status",
+    "issuetype",
+    "assignee",
+    "description",
+    "parent",
+    "attachment",
+]
 _JQL_FIELDS: Final = ["summary", "status", "issuetype", "assignee", "parent"]
 
 _BACKOFF_BASE_SECONDS: Final = 1.0
@@ -376,6 +411,13 @@ class JiraClient:
         issuetype_obj = fields.get("issuetype") or {}
         assignee_obj = fields.get("assignee") or {}
 
+        # Pre-pass: collect every media filename referenced from the
+        # description body so we can mark each attachment as embedded
+        # (mentioned in the prose) vs orphan (uploaded but unreferenced).
+        description_adf = fields.get("description")
+        embedded_filenames = collect_media_filenames(description_adf)
+        attachments = _parse_attachments(fields.get("attachment"), embedded_filenames)
+
         return Ticket(
             key=key,
             summary=fields.get("summary") or "",
@@ -385,10 +427,96 @@ class JiraClient:
             # heading_offset=3 keeps user-authored headings ("# Story",
             # "## Goal") inside the renderer's level-3 ### Description
             # section instead of breaking out above the document title.
-            description_md=adf_to_markdown(fields.get("description"), heading_offset=3),
+            # ``attachments`` is also passed so embedded media nodes in the
+            # description can be resolved to their filename via attrs.alt.
+            description_md=adf_to_markdown(
+                description_adf,
+                heading_offset=3,
+                attachments=attachments,
+            ),
             parent_key=parent.get("key"),
             url=f"{self._base_url}/browse/{key}",
+            attachments=attachments,
         )
+
+    async def download_attachment(
+        self,
+        content_url: str,
+        *,
+        max_bytes: int,
+    ) -> tuple[bytes, str]:
+        """Stream an attachment download, aborting early if it exceeds ``max_bytes``.
+
+        Returns ``(data, mime_type)``. ``content_url`` is the absolute URL Jira
+        returns in the ``attachment.content`` field; it's served by the same
+        host that needs BasicAuth, so we reuse the client's auth and redirects.
+
+        Raises:
+            JiraAuthError: 401/403 from Jira.
+            JiraNotFoundError: 404 — the attachment was deleted between the
+                list-fetch and the download.
+            JiraAttachmentTooLargeError: ``Content-Length`` header (when
+                present) exceeds ``max_bytes``, or accumulated bytes exceed
+                it mid-stream.
+            JiraError: any other transport / server failure.
+        """
+        if self._client is None:
+            raise RuntimeError("JiraClient used outside of its async context manager")
+
+        try:
+            async with self._client.stream("GET", content_url, follow_redirects=True) as response:
+                code = response.status_code
+                if code in (401, 403):
+                    raise JiraAuthError(
+                        f"{code} {response.reason_phrase} — check JIRA_EMAIL and JIRA_API_TOKEN"
+                    )
+                if code == 404:
+                    raise JiraNotFoundError(f"GET {content_url} returned 404")
+                if code >= 400:
+                    raise JiraError(f"attachment download failed: HTTP {code}")
+
+                content_length = response.headers.get("content-length")
+                if content_length:
+                    try:
+                        declared = int(content_length)
+                    except ValueError:
+                        # Some proxies and edge servers send malformed values
+                        # (chunked-then-rewritten responses, etc.). Log so a
+                        # misbehaving intermediary is debuggable, then fall
+                        # through to the streaming accumulator which enforces
+                        # the cap independently of the header.
+                        logger.warning(
+                            "Ignoring invalid Content-Length %r on attachment download",
+                            content_length,
+                        )
+                        declared = 0
+                    if declared > max_bytes:
+                        raise JiraAttachmentTooLargeError(
+                            f"attachment is {declared} bytes, exceeds cap {max_bytes}",
+                            size=declared,
+                            max_bytes=max_bytes,
+                        )
+
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise JiraAttachmentTooLargeError(
+                            f"attachment exceeds cap {max_bytes} bytes mid-download",
+                            size=total,
+                            max_bytes=max_bytes,
+                        )
+                    chunks.append(chunk)
+
+                mime_type = (
+                    response.headers.get("content-type", "application/octet-stream")
+                    .split(";", 1)[0]
+                    .strip()
+                )
+                return b"".join(chunks), mime_type
+        except (httpx.TimeoutException, httpx.NetworkError) as e:
+            raise JiraError(f"network error during attachment download: {e}") from e
 
 
 def _compute_backoff(attempt: int) -> float:
@@ -406,6 +534,78 @@ def _parse_retry_after(response: httpx.Response) -> float:
         # Jira Cloud always returns integer seconds. If support for HTTP-date
         # form is ever needed, parse via email.utils.parsedate_to_datetime.
         return 0.0
+
+
+def _parse_attachments(
+    raw: Any,
+    embedded_filenames: set[str] | None = None,
+) -> tuple[Attachment, ...]:
+    """Map the ``fields.attachment`` array onto :class:`Attachment` instances.
+
+    Returns ``()`` when ``raw`` is missing or empty. Skipped items:
+
+    - **Missing ``id`` or ``content``** — WARN log emitted (the upstream
+      payload is genuinely broken; we want it visible).
+    - **Malformed ``created``** (non-ISO string) — WARN log emitted.
+    - **Naive ``created``** (no tzinfo) — silently skipped; Jira always
+      sends a tz so this would only fire on synthetic / mangled payloads.
+    - **Missing ``created``** — silently skipped, same reasoning.
+
+    Partial data must not break the tool response — every error path
+    drops the offending item and keeps going.
+
+    ``embedded_filenames`` (when provided) is the set of media filenames
+    referenced from inside the description body. Each attachment is
+    marked ``embedded=True`` when its filename — or its UUID-suffix
+    normalised form — appears in that set; otherwise ``embedded=False``.
+    """
+    if not isinstance(raw, list):
+        return ()
+    embedded_set = embedded_filenames or set()
+    out: list[Attachment] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        attachment_id = item.get("id")
+        content_url = item.get("content")
+        if not attachment_id or not content_url:
+            logger.warning("Skipping attachment with missing id or content URL")
+            continue
+        created_raw = item.get("created")
+        if not created_raw:
+            continue
+        try:
+            created = datetime.fromisoformat(created_raw)
+        except ValueError:
+            logger.warning("Skipping attachment with malformed created: %r", created_raw)
+            continue
+        if created.tzinfo is None:
+            continue
+        author = (item.get("author") or {}).get("displayName") or "Unknown"
+        try:
+            size = int(item.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        filename = item.get("filename") or ""
+        # ADF's attrs.alt keeps the original filename even when Jira has
+        # appended ``(uuid)`` to the stored attachment.filename for
+        # disambiguation — normalise before comparing.
+        embedded = bool(embedded_set) and (
+            filename in embedded_set or normalise_attachment_filename(filename) in embedded_set
+        )
+        out.append(
+            Attachment(
+                id=str(attachment_id),
+                filename=filename,
+                mime_type=item.get("mimeType") or "application/octet-stream",
+                size=size,
+                created=created,
+                author=author,
+                content_url=str(content_url),
+                embedded=embedded,
+            )
+        )
+    return tuple(out)
 
 
 def _parse_comment(raw: dict[str, Any]) -> Comment | None:

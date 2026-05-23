@@ -9,17 +9,18 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-purple.svg)](https://modelcontextprotocol.io)
 
-Pull rich Jira ticket context into your LLM during development. Three composable MCP tools — one for the surrounding hierarchy, one for a single ticket's full content, one for just the Smart Checklist (ACCs) — render Jira data as structured markdown. Read-only by design, built for developers who read tickets, not manage them.
+Pull rich Jira ticket context into your LLM during development. Four composable MCP tools — one for the surrounding hierarchy, one for a single ticket's full content, one for just the Smart Checklist (ACCs), one for fetching an attachment as a native MCP image / PDF / text payload — render Jira data as structured markdown. Read-only by design, built for developers who read tickets, not manage them.
 
-## The three tools at a glance
+## The four tools at a glance
 
 | Tool | Question it answers | Output |
 |---|---|---|
 | `get_issue_tree` | _What's around this ticket?_ | Hierarchy with focus marker — root → leaves, lite info per ticket, status overview |
-| `get_ticket_content` | _What's in this specific ticket?_ | Full description + Smart Checklist + optional comments — single ticket only |
+| `get_ticket_content` | _What's in this specific ticket?_ | Full description + Smart Checklist + attachment list + optional comments — single ticket only |
 | `get_smart_checklist` | _Just the ACCs._ | Just the Smart Checklist — token-efficient when nothing else is needed |
+| `get_ticket_attachment` | _Give me that file._ | Native MCP image / PDF / text payload for a single attachment, by id |
 
-A typical workflow has the LLM call `get_issue_tree` first to discover structure, then drill into specific tickets with `get_ticket_content`. Each tool does one thing; they compose.
+A typical workflow has the LLM call `get_issue_tree` first to discover structure, then drill into specific tickets with `get_ticket_content`. When the description references an attached design / spec / log, the model can pull just that file via `get_ticket_attachment` instead of guessing. Each tool does one thing; they compose.
 
 ## What you get
 
@@ -59,7 +60,7 @@ Notes:
 
 ### `get_ticket_content` example
 
-Full content of a single ticket — description, Smart Checklist (when present), optional comments. No hierarchy walk, no peers.
+Full content of a single ticket — description, Smart Checklist (when present), attachment list (when any), optional comments. No hierarchy walk, no peers.
 
 ````markdown
 # PROJ-240 · [Story] Extract invoice generation
@@ -67,6 +68,7 @@ Full content of a single ticket — description, Smart Checklist (when present),
 
 ## Description
 Pull invoice logic out of BillingService into a new InvoiceService.
+The endpoint contract is in the attached PDF — see [attachment: invoice-api.pdf (id=12348)].
 
 ## Smart Checklist (1/3 done)
 ### 1. Service alignment
@@ -74,10 +76,20 @@ Pull invoice logic out of BillingService into a new InvoiceService.
 - [-] Migration plan drafted
 - [ ] Rollout communication to support
 
+## Attachments
+- [12347] mockup-invoice-pdf.png · image/png · 412 KB · 2026-05-12 by Piotr D. · embedded
+- [12348] invoice-api.pdf · application/pdf · 2.4 MB · 2026-05-12 by Piotr D. · embedded
+- [12349] revised-mockup-v2.png · image/png · 480 KB · 2026-05-16 by Anna K. · orphan
+
 ## Comments  (only when include_comments=True)
 **2026-04-22 14:05, Piotr D.:**
 > Started profiling. 80% in CSV writer.
 ````
+
+Notes:
+- **Attachments section** is omitted entirely when the ticket has none — no `_(no attachments)_` noise.
+- **Embedded media** inside the description (e.g. a pasted screenshot) renders as `[attachment: filename (id=...)]` when the file is also in the attachment list. The id is the same key the model needs for `get_ticket_attachment`.
+- **`embedded` vs `orphan`** marker per attachment: `embedded` means the file is referenced from inside the description body (someone pasted it into the prose); `orphan` means the file is attached to the ticket but never mentioned. Orphan attachments are typically post-review revisions or supplementary material the author chose not to inline — the LLM treats them as lower-priority context unless something in the prose redirects to them.
 
 ### `get_smart_checklist` example
 
@@ -90,6 +102,19 @@ Pull invoice logic out of BillingService into a new InvoiceService.
 - [-] Migration plan drafted
 - [ ] Rollout communication to support
 ````
+
+### `get_ticket_attachment` example
+
+Unlike the other three tools, this one returns a **native MCP content payload** rather than markdown. The model decides which attachment to pull based on the `## Attachments` list it saw via `get_ticket_content`, then calls this tool with the corresponding id. Dispatch is by mime type:
+
+| Mime | Returned as | What the LLM sees |
+|---|---|---|
+| `image/*` | `ImageContent` | The image, natively (Claude reads PNG/JPG/GIF/WebP/SVG/BMP) |
+| `application/pdf` | `EmbeddedResource` (blob) | The PDF, natively (Claude reads pages of text + figures) |
+| `text/*` | Markdown string | File contents under a `# Attachment: filename (mime)` header — readable in any client |
+| Anything else | `Error: unsupported mime …` string | Pointer to `content_url` for manual download |
+
+Size cap: `JIRA_ATTACHMENT_MAX_MB` env var (default `20`). Files larger than the cap return an `Error: attachment too large (X MB > limit Y MB). Download manually from <url>` string — the tool refuses to pull bytes that would blow the model's context window.
 
 ## Prerequisites
 
@@ -110,7 +135,16 @@ uv sync
 
 ## Configure your MCP client
 
-The server needs three environment variables: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`. Provide them either inline in the MCP client config (recommended) or via a `.env` file in the repo (see `.env.example`).
+The server needs three required environment variables — `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` — plus a handful of optional ones. Provide them either inline in the MCP client config (recommended) or via a `.env` file in the repo (see `.env.example`).
+
+| Variable | Required | Default | Notes |
+|---|---|---|---|
+| `JIRA_BASE_URL` | yes | — | e.g. `https://your-org.atlassian.net` |
+| `JIRA_EMAIL` | yes | — | The account that owns the API token |
+| `JIRA_API_TOKEN` | yes | — | [Create one here](https://id.atlassian.com/manage-profile/security/api-tokens) |
+| `REQUEST_TIMEOUT` | no | `30.0` | Per-request HTTP timeout in seconds |
+| `MAX_RETRIES` | no | `3` | Additional attempts on transient failures (429, 5xx, network errors) |
+| `JIRA_ATTACHMENT_MAX_MB` | no | `20` | Hard cap on attachment download size. `get_ticket_attachment` refuses larger files and returns an `Error: attachment too large …` string with the original `content_url` |
 
 ### Claude Desktop (macOS)
 
@@ -181,6 +215,13 @@ $EDITOR .env
 |---|---|---|---|
 | `issue_key` | string | required | Single ticket. |
 
+**`get_ticket_attachment`**
+
+| Parameter | Type | Default | Notes |
+|---|---|---|---|
+| `issue_key` | string | required | Ticket the attachment belongs to. |
+| `attachment_id` | string | required | The numeric id from the `## Attachments` section of `get_ticket_content` (e.g. `"12345"`). |
+
 ### Workflow recipes
 
 Prompt templates for typical developer workflows. Paste any of these into Claude (or any MCP-capable LLM) along with the relevant ticket key — they **force the model to call all three tools in the right order** instead of guessing which one fits the question. Each recipe maps a real situation to a concrete tool sequence.
@@ -225,6 +266,19 @@ Useful right before approving a PR linked to a Story or Subtask.
 >
 > Be skeptical — if an ACC says "comment section must be hidable by the user" and the diff has no UI changes, flag it as untouched.
 
+#### Pulling a design / spec attached to the ticket
+
+When the ticket description is sparse and points at an attached mockup or PDF spec ("implement per the design"), this sequence puts the file directly in front of the model.
+
+> I'm picking up **PROJ-1234** and the description says to follow the attached design. Use `jira-context-mcp` to:
+>
+> 1. Call `get_ticket_content(issue_key="PROJ-1234")` and read the `## Attachments` section.
+> 2. Pick the most relevant file (usually a `.png` mockup or `.pdf` spec). Note its id.
+> 3. Call `get_ticket_attachment(issue_key="PROJ-1234", attachment_id="<id>")` — the file will arrive as a native image / PDF you can inspect.
+> 4. Describe what's in the file, then map it to the description / ACCs.
+>
+> Don't pull every attachment by default — most tickets have noisy extras (logs, old screenshots). Pick the one mentioned in the description, or ask me which one if it's unclear.
+
 #### Stand-up prep — multiple tickets at a glance
 
 Run this just before daily / weekly to get a quick status sweep across whatever you're juggling.
@@ -247,6 +301,10 @@ All errors come back as the tool response (a string starting with `Error:`) rath
 - `Error: Jira rate limit exceeded after retries. ...` — back off and retry
 - `Error: invalid depth parameter. ...` — `depth_up` was `< 1`
 - `Error: hierarchy cycle detected. ...` — parent link loop in Jira (shouldn't happen, but defensive)
+- `Error: attachment 'X' not found on KEY. Available ids: ...` — wrong id; the message lists what's actually on the ticket
+- `Error: attachment too large (X MB > limit Y MB). Download manually from <url>` — exceeds `JIRA_ATTACHMENT_MAX_MB`
+- `Error: unsupported mime type 'X'. Tool supports image/*, application/pdf, text/*. ...` — e.g. `.docx` / `.zip` / video; the message includes the original URL for manual download
+- `Error: attachment exceeds size cap — ...` — the file's `Content-Length` (or accumulated stream bytes) crossed the cap mid-download
 
 ### From the shell (no MCP client needed)
 
@@ -273,6 +331,19 @@ import asyncio
 from jira_context_mcp.server import get_smart_checklist
 print(asyncio.run(get_smart_checklist(issue_key='PROJ-1234')))
 "
+
+# A single attachment (image / PDF / text). Stdio doesn't render images,
+# so this is mainly useful as a debug call — pipe binary output to a file.
+uv run python -c "
+import asyncio
+from jira_context_mcp.server import get_ticket_attachment
+result = asyncio.run(get_ticket_attachment(issue_key='PROJ-1234', attachment_id='12345'))
+# Result is fastmcp Image / File / str depending on the file type.
+if hasattr(result, 'data'):
+    import sys; sys.stdout.buffer.write(result.data)
+else:
+    print(result)
+" > out.bin
 ```
 
 ## Known limitations
@@ -282,7 +353,10 @@ print(asyncio.run(get_smart_checklist(issue_key='PROJ-1234')))
 - **Read-only by design.** No `create_*`, `update_*`, `transition_*` tools — this is intentional.
 - **Smart Checklist progress:** for the modern bullet-list format, per-item status lives in sibling Jira properties (`SmartChecklist`, `ItemStatusSearchMeta`) that the parser doesn't currently read. Items default to `"open"`, so the count shows `(N items)` even when some are completed in Jira UI. Legacy task-list markers carried inline (`[x]`, `[-]`, `[~]`) are honored when present. Reading the sibling properties for accurate `(N/M done)` is on the roadmap.
 - **`depth_down` is capped at 3.** Asking for more is silently clamped. The focus ticket and its direct ancestors are always reachable in the tree, even when the focus sits below `depth_down` levels (the spine is always expanded).
-- **ADF coverage:** the converter handles paragraphs, headings (auto-shifted to nest under the surrounding hierarchy in `get_ticket_content`), lists, code blocks, blockquotes, marks (`strong`/`em`/`code`/`strike`/`link`), hard breaks, mentions, emoji, inline cards (URL extraction), media nodes (`[image]` placeholder), and horizontal rules. Two rarer types — `panel` and `table` — still render as `[unsupported: <type>]`; add a handler in `src/jira_context_mcp/adf.py` if you need them.
+- **ADF coverage:** the converter handles paragraphs, headings (auto-shifted to nest under the surrounding hierarchy in `get_ticket_content`), lists, code blocks, blockquotes, marks (`strong`/`em`/`code`/`strike`/`link`), hard breaks, mentions, emoji, inline cards (URL extraction), media nodes (resolved to `[attachment: filename (id=...)]` when the surrounding ticket carries that attachment, else `[image]`), and horizontal rules. Two rarer types — `panel` and `table` — still render as `[unsupported: <type>]`; add a handler in `src/jira_context_mcp/adf.py` if you need them.
+- **Attachment fetch is per-call, not cached.** Every `get_ticket_attachment` call re-fetches the ticket metadata plus the file. For typical "look at one design and move on" flows that's fine; for repeated reads of the same file, expect the latency cost.
+- **Attachment mime support is curated.** `image/*`, `application/pdf`, and `text/*` round-trip through native MCP content types; anything else returns an `Error: unsupported mime …` with the original `content_url`. The model can suggest a manual download, but `.docx` / `.xlsx` / `.zip` / video won't reach the conversation directly.
+- **Attachment download is not retried.** Unlike the main JSON-API calls, attachment streams skip the exponential-backoff retry loop — sporadic 5xx on the download path surface as a single `Error: Jira request failed` rather than being papered over with retries. Re-run the tool call if you suspect a transient failure.
 
 ## Development
 
@@ -297,7 +371,7 @@ uv run python -m jira_context_mcp  # stdio server — blocks waiting for MCP han
 Run the test suite, linter, and type checker:
 
 ```bash
-uv run pytest                       # 171 tests, ~1s
+uv run pytest                       # 234 tests, ~1.8s
 uv run ruff check src tests         # lint
 uv run ruff format src tests        # format (auto-applies)
 uv run ruff format --check src tests  # format check (CI-style)
@@ -319,13 +393,13 @@ Project layout:
 src/jira_context_mcp/
 ├── __init__.py
 ├── __main__.py       # python -m entrypoint
-├── server.py         # FastMCP server + 3 tool registrations
+├── server.py         # FastMCP server + 4 tool registrations
 ├── config.py         # pydantic-settings for env vars
-├── models.py         # frozen pydantic DTOs (Ticket, Comment, Checklist, TreeNode, ...)
-├── jira.py           # async httpx client + retries + checklist parser
+├── models.py         # frozen pydantic DTOs (Ticket, Comment, Checklist, Attachment, TreeNode, ...)
+├── jira.py           # async httpx client + retries + checklist parser + attachment download
 ├── tree.py           # walk-up + walk-down hierarchy builder
-├── adf.py            # ADF → markdown converter (with heading_offset)
-└── markdown.py       # final renderers (tree, content, checklist)
+├── adf.py            # ADF → markdown converter (with heading_offset + media-id resolution)
+└── markdown.py       # final renderers (tree, content, checklist, attachments)
 ```
 
 ## License

@@ -83,7 +83,7 @@ def render_issue_tree(tree: TreeNode) -> str:
         ```
         ROOT-1 · [Epic] ... · In Progress
         ├── CHILD-1 · [Story] ... · In QA
-        │   ├── 🎯 CHILD-1-1 · [Task] ... · Gotowe ⬅️ FOCUS
+        │   ├── 🎯 CHILD-1-1 · [Task] ... · Done ⬅️ FOCUS
         │   └── ...
         └── CHILD-2 · ...
         ```

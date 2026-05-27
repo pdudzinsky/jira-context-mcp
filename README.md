@@ -109,18 +109,33 @@ Unlike the other three tools, this one returns a **native MCP content payload** 
 
 | Mime | Returned as | What the LLM sees |
 |---|---|---|
-| `image/*` | `ImageContent` | The image, natively (Claude reads PNG/JPG/GIF/WebP/SVG/BMP) |
-| `application/pdf` | `EmbeddedResource` (blob) | The PDF, natively (Claude reads pages of text + figures) |
-| `text/*` | Markdown string | File contents under a `# Attachment: filename (mime)` header — readable in any client |
+| `image/*` | `fastmcp.Image` (MCP `ImageContent`) | The image, natively (Claude reads PNG/JPG/GIF/WebP/SVG/BMP) |
+| `application/pdf` | `fastmcp.File` (MCP `EmbeddedResource`) | The PDF, natively (Claude reads pages of text + figures) |
+| `text/*` | `str` (MCP `TextContent`) | File contents under a `# Attachment: filename (mime)` header — readable in any client |
 | Anything else | `Error: unsupported mime …` string | Pointer to `content_url` for manual download |
 
 Size cap: `JIRA_ATTACHMENT_MAX_MB` env var (default `20`). Files larger than the cap return an `Error: attachment too large (X MB > limit Y MB). Download manually from <url>` string — the tool refuses to pull bytes that would blow the model's context window.
+
+## Why this and not Atlassian's official MCP?
+
+Atlassian ships an official [Rovo MCP Server](https://www.atlassian.com/platform/remote-mcp-server) covering Jira, Confluence, Compass, and Bitbucket. It supports read **and** write actions, uses OAuth 2.1, and is administered at the organisation level. For broad team-wide automation it's the right default — start there if your use case overlaps.
+
+`jira-context-mcp` exists for a narrower slot: **reading tickets while writing code**, with the LLM as the primary consumer. Concrete differences against [Rovo's supported tool list](https://support.atlassian.com/atlassian-rovo-mcp-server/docs/supported-tools/) (verified 2026-05 — Atlassian's API moves, re-check if reading much later):
+
+- **Smart Checklist (Railsware) plugin support.** The plugin stores acceptance criteria in an issue property (`com.railsware.SmartChecklist.checklist`) that Rovo's tools don't surface. On Atlassian Cloud teams that use it as the canonical ACC location (with descriptions like "See ACCs"), `get_smart_checklist` is often the single most useful tool — Rovo has no equivalent.
+- **Attachment fetching as a native MCP payload.** `get_ticket_attachment` returns native MCP image / PDF / text payloads, so the LLM reads designs, PDF specs, and logs directly in-context. Rovo's tool list has no attachment download.
+- **Multi-level issue hierarchy walk in one call.** `get_issue_tree` traverses parents and children across multiple levels, builds a tree centred on the focus, and renders a status aggregate. Rovo's `getJiraIssue` exposes one ticket at a time including its `parent` field — building the same tree requires multiple calls plus client-side rendering.
+- **Read-only by design.** No `create`, `edit`, or `transition` tools — the API surface can't mutate Jira state, so the LLM can't accidentally close a ticket or edit a description.
+- **Local stdio + API token install.** No OAuth flow, no organisation admin involvement, no managed service. Three env vars, one config block, restart the client. Fits a "personal dev assistant" workflow rather than team-wide automation.
+- **Markdown output, not raw fields.** Tickets render as headings + lists + structured attachment metadata (`[id, filename, mime, size, embedded/orphan]`) — smaller token footprint, and the model can quote and reason over them without parsing nested fields.
+
+Rule of thumb: **pick Rovo** for write actions or multi-product team workflows; **pick this one** for read-heavy dev workflows, Smart Checklist teams, and attachment-aware ticket context.
 
 ## Prerequisites
 
 - Python 3.11+
 - [`uv`](https://github.com/astral-sh/uv) (`brew install uv` on macOS, [other platforms](https://docs.astral.sh/uv/getting-started/installation/))
-- An Atlassian Cloud instance (Jira Server / Data Center are not supported in v0.1)
+- An Atlassian Cloud instance (Jira Server / Data Center are not supported)
 - An [Atlassian API token](https://id.atlassian.com/manage-profile/security/api-tokens)
 
 ## Install
@@ -175,7 +190,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 > **Heads-up on tokens:** Atlassian API tokens are ~192 characters of `base64`-ish goo. If you paste one and your line wraps in the JSON editor, whitespace can sneak into the middle of the string — Jira will then silently return 404 on private projects. Paste carefully, or strip the value through `tr -d '[:space:]'` before saving.
 
-Quit Claude Desktop fully (`Cmd+Q`, not just close the window) and reopen. The three tools should appear in the available-tools list.
+Quit Claude Desktop fully (`Cmd+Q`, not just close the window) and reopen. The four tools should appear in the available-tools list.
 
 ### Other MCP clients
 
@@ -224,7 +239,7 @@ $EDITOR .env
 
 ### Workflow recipes
 
-Prompt templates for typical developer workflows. Paste any of these into Claude (or any MCP-capable LLM) along with the relevant ticket key — they **force the model to call all three tools in the right order** instead of guessing which one fits the question. Each recipe maps a real situation to a concrete tool sequence.
+Prompt templates for typical developer workflows. Paste any of these into Claude (or any MCP-capable LLM) along with the relevant ticket key — they **force the model to call the right tools in the right order** instead of guessing which one fits the question. Each recipe maps a real situation to a concrete tool sequence.
 
 #### Picking up a ticket from the sprint
 
@@ -308,7 +323,7 @@ All errors come back as the tool response (a string starting with `Error:`) rath
 
 ### From the shell (no MCP client needed)
 
-Each tool is an async Python function — call it directly with `uv run` for ad-hoc reads, debugging, or piping into other tools. All three snippets support standard shell redirects (`> file.md`) and pipes (`| glow -`).
+Each tool is an async Python function — call it directly with `uv run` for ad-hoc reads, debugging, or piping into other tools. All four snippets support standard shell redirects; the first three (markdown output) also pipe cleanly into `| glow -`.
 
 ```bash
 # Tree overview
@@ -350,13 +365,12 @@ else:
 
 - **Comments:** capped at 100 per ticket. If a ticket has more, a WARN is logged to stderr and the first 100 are returned.
 - **Jira Cloud only.** No Jira Server / Data Center support.
-- **Read-only by design.** No `create_*`, `update_*`, `transition_*` tools — this is intentional.
-- **Smart Checklist progress:** for the modern bullet-list format, per-item status lives in sibling Jira properties (`SmartChecklist`, `ItemStatusSearchMeta`) that the parser doesn't currently read. Items default to `"open"`, so the count shows `(N items)` even when some are completed in Jira UI. Legacy task-list markers carried inline (`[x]`, `[-]`, `[~]`) are honored when present. Reading the sibling properties for accurate `(N/M done)` is on the roadmap.
+- **Smart Checklist progress:** v3+ bullet-list checklists display as `(N items)` even when some items are marked done in Jira UI. Legacy `[x]` / `[-]` / `[~]` markers display correctly as `(N/M done)`. Accurate v3+ progress is on the roadmap.
 - **`depth_down` is capped at 3.** Asking for more is silently clamped. The focus ticket and its direct ancestors are always reachable in the tree, even when the focus sits below `depth_down` levels (the spine is always expanded).
-- **ADF coverage:** the converter handles paragraphs, headings (auto-shifted to nest under the surrounding hierarchy in `get_ticket_content`), lists, code blocks, blockquotes, marks (`strong`/`em`/`code`/`strike`/`link`), hard breaks, mentions, emoji, inline cards (URL extraction), media nodes (resolved to `[attachment: filename (id=...)]` when the surrounding ticket carries that attachment, else `[image]`), and horizontal rules. Two rarer types — `panel` and `table` — still render as `[unsupported: <type>]`; add a handler in `src/jira_context_mcp/adf.py` if you need them.
+- **ADF coverage:** `panel` and `table` nodes render as `[unsupported: <type>]` — add a handler in `src/jira_context_mcp/adf.py` if you need them. Full list of supported types in CHANGELOG.
 - **Attachment fetch is per-call, not cached.** Every `get_ticket_attachment` call re-fetches the ticket metadata plus the file. For typical "look at one design and move on" flows that's fine; for repeated reads of the same file, expect the latency cost.
 - **Attachment mime support is curated.** `image/*`, `application/pdf`, and `text/*` round-trip through native MCP content types; anything else returns an `Error: unsupported mime …` with the original `content_url`. The model can suggest a manual download, but `.docx` / `.xlsx` / `.zip` / video won't reach the conversation directly.
-- **Attachment download is not retried.** Unlike the main JSON-API calls, attachment streams skip the exponential-backoff retry loop — sporadic 5xx on the download path surface as a single `Error: Jira request failed` rather than being papered over with retries. Re-run the tool call if you suspect a transient failure.
+- **Attachment download is not retried.** Unlike the main JSON-API calls, attachment streams skip the retry loop — sporadic 5xx on the download path surface as a single `Error: Jira request failed`. Re-run the tool call if you suspect a transient failure.
 
 ## Development
 

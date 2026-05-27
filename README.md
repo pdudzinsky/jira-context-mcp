@@ -34,17 +34,17 @@ Given any ticket — leaf, mid, or root — the tool walks **upward** to the top
 ## Overview
 
 Total: 27 tickets · By type: 1 Epic, 5 Story, 21 Subtask
-By status: 24 Gotowe, 2 In QA, 1 Odrzucono
+By status: 24 Done, 2 In QA, 1 Rejected
 
 ## Tree
 
 ```
 PROJ-100 · [Epic] Refactor billing module · In Progress
 ├── PROJ-239 · [Story] Payment retry logic · Done
-│   ├── PROJ-1230 · [Subtask] [BE] Retry policy · Gotowe
-│   └── PROJ-1231 · [Subtask] [BE] Idempotency keys · Gotowe
+│   ├── PROJ-1230 · [Subtask] [BE] Retry policy · Done
+│   └── PROJ-1231 · [Subtask] [BE] Idempotency keys · Done
 ├── PROJ-240 · [Story] Extract invoice generation · In Progress
-│   ├── PROJ-1233 · [Subtask] [BE] Extract CSV export · Gotowe
+│   ├── PROJ-1233 · [Subtask] [BE] Extract CSV export · Done
 │   ├── 🎯 PROJ-1234 · [Subtask] [BE] Add PDF template · In Progress ⬅️ FOCUS
 │   └── PROJ-1235 · [Subtask] [BE] Add XML export · To Do
 └── PROJ-260 · [Story] Email notifications · To Do

@@ -60,6 +60,28 @@ def list_item(*content: dict[str, Any]) -> dict[str, Any]:
     return {"type": "listItem", "content": list(content)}
 
 
+def table(*rows: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "table", "content": list(rows)}
+
+
+def table_row(*cells: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "tableRow", "content": list(cells)}
+
+
+def table_cell(*content: dict[str, Any], attrs: dict[str, Any] | None = None) -> dict[str, Any]:
+    node: dict[str, Any] = {"type": "tableCell", "content": list(content)}
+    if attrs is not None:
+        node["attrs"] = attrs
+    return node
+
+
+def table_header(*content: dict[str, Any], attrs: dict[str, Any] | None = None) -> dict[str, Any]:
+    node: dict[str, Any] = {"type": "tableHeader", "content": list(content)}
+    if attrs is not None:
+        node["attrs"] = attrs
+    return node
+
+
 # ---------- basics ----------
 
 
@@ -537,6 +559,353 @@ def test_heading_offset_propagates_through_list_item() -> None:
     node = bullet_list(list_item(heading(1, text("h"))))
     out = adf_to_markdown(doc(node), heading_offset=2)
     assert "- ### h" in out
+
+
+# ---------- tables ----------
+
+
+def test_table_with_header_row() -> None:
+    d = doc(
+        table(
+            table_row(table_header(para(text("A"))), table_header(para(text("B")))),
+            table_row(table_cell(para(text("a1"))), table_cell(para(text("b1")))),
+            table_row(table_cell(para(text("a2"))), table_cell(para(text("b2")))),
+        )
+    )
+    assert adf_to_markdown(d) == "| A | B |\n| --- | --- |\n| a1 | b1 |\n| a2 | b2 |"
+
+
+def test_table_without_header_row_gets_blank_header() -> None:
+    d = doc(table(table_row(table_cell(para(text("a"))), table_cell(para(text("b"))))))
+    assert adf_to_markdown(d) == "|  |  |\n| --- | --- |\n| a | b |"
+
+
+def test_table_first_column_header_cells_render_bold() -> None:
+    d = doc(
+        table(
+            table_row(table_header(para(text("k1"))), table_cell(para(text("v1")))),
+            table_row(table_header(para(text("k2"))), table_cell(para(text("v2")))),
+        )
+    )
+    assert adf_to_markdown(d) == "|  |  |\n| --- | --- |\n| **k1** | v1 |\n| **k2** | v2 |"
+
+
+def test_table_all_header_row_mid_table_renders_bold() -> None:
+    d = doc(
+        table(
+            table_row(table_header(para(text("A"))), table_header(para(text("B")))),
+            table_row(table_header(para(text("S1"))), table_header(para(text("S2")))),
+            table_row(table_cell(para(text("a"))), table_cell(para(text("b")))),
+        )
+    )
+    assert adf_to_markdown(d) == "| A | B |\n| --- | --- |\n| **S1** | **S2** |\n| a | b |"
+
+
+def test_table_only_header_row_renders_header_and_separator() -> None:
+    d = doc(table(table_row(table_header(para(text("A"))), table_header(para(text("B"))))))
+    assert adf_to_markdown(d) == "| A | B |\n| --- | --- |"
+
+
+def test_table_cell_multi_block_joined_with_br() -> None:
+    d = doc(table(table_row(table_cell(para(text("a")), para(text("b"))))))
+    assert adf_to_markdown(d) == "|  |\n| --- |\n| a<br>b |"
+
+
+def test_table_cell_hard_break_becomes_br() -> None:
+    d = doc(table(table_row(table_cell(para(text("a"), {"type": "hardBreak"}, text("b"))))))
+    assert adf_to_markdown(d) == "|  |\n| --- |\n| a<br>b |"
+
+
+def test_table_cell_bullet_list_flattens() -> None:
+    d = doc(
+        table(
+            table_row(
+                table_cell(bullet_list(list_item(para(text("a"))), list_item(para(text("b")))))
+            )
+        )
+    )
+    assert adf_to_markdown(d) == "|  |\n| --- |\n| - a<br>- b |"
+
+
+def test_table_cell_code_block_keeps_fences_and_indent() -> None:
+    code = {
+        "type": "codeBlock",
+        "attrs": {"language": "python"},
+        "content": [text("def x():\n    pass")],
+    }
+    d = doc(table(table_row(table_cell(code))))
+    assert adf_to_markdown(d) == "|  |\n| --- |\n| ```python<br>def x():<br>    pass<br>``` |"
+
+
+def test_table_cell_pipe_escaped() -> None:
+    d = doc(table(table_row(table_cell(para(text("a|b"))))))
+    assert adf_to_markdown(d) == "|  |\n| --- |\n| a\\|b |"
+
+
+def test_table_cell_media_resolves_attachment() -> None:
+    media_block = {
+        "type": "mediaSingle",
+        "content": [{"type": "media", "attrs": {"id": "ms", "alt": "mockup.png"}}],
+    }
+    d = doc(table(table_row(table_cell(media_block))))
+    out = adf_to_markdown(d, attachments=[_att("44416", "mockup.png")])
+    assert out == "|  |\n| --- |\n| [attachment: mockup.png (id=44416)] |"
+
+
+def test_heading_offset_applies_inside_table_cell() -> None:
+    d = doc(table(table_row(table_cell(heading(1, text("h"))))))
+    out = adf_to_markdown(d, heading_offset=3)
+    assert out == "|  |\n| --- |\n| #### h |"
+
+
+def test_empty_table_returns_none() -> None:
+    assert adf_to_markdown(doc(table())) is None
+    assert adf_to_markdown(doc(table(table_row()))) is None
+
+
+def test_empty_cell_renders_blank_column() -> None:
+    d = doc(
+        table(table_row(table_cell(para(text("a"))), table_cell(), table_cell(para(text("c")))))
+    )
+    assert adf_to_markdown(d) == "|  |  |  |\n| --- | --- | --- |\n| a |  | c |"
+
+
+def test_row_of_all_empty_cells_still_emitted() -> None:
+    d = doc(
+        table(
+            table_row(table_cell(para(text("a"))), table_cell(para(text("b")))),
+            table_row(table_cell(), table_cell()),
+        )
+    )
+    assert adf_to_markdown(d) == "|  |  |\n| --- | --- |\n| a | b |\n|  |  |"
+
+
+def test_ragged_rows_size_the_header_not_every_row() -> None:
+    """The header and delimiter carry the table's full width; a short body row
+    is left short, which GFM fills in. Padding every row would make the emitted
+    cell count ``rows x widest row``."""
+    d = doc(
+        table(
+            table_row(
+                table_cell(para(text("a"))),
+                table_cell(para(text("b"))),
+                table_cell(para(text("c"))),
+            ),
+            table_row(table_cell(para(text("x"))), table_cell(para(text("y")))),
+        )
+    )
+    assert adf_to_markdown(d) == "|  |  |  |\n| --- | --- | --- |\n| a | b | c |\n| x | y |"
+
+
+def test_colspan_expands_to_filler_cells() -> None:
+    d = doc(
+        table(
+            table_row(
+                table_cell(para(text("span")), attrs={"colspan": 2}),
+                table_cell(para(text("c"))),
+            ),
+            table_row(
+                table_cell(para(text("a"))),
+                table_cell(para(text("b"))),
+                table_cell(para(text("d"))),
+            ),
+        )
+    )
+    assert adf_to_markdown(d) == "|  |  |  |\n| --- | --- | --- |\n| span |  | c |\n| a | b | d |"
+
+
+def test_rowspan_fills_covered_rows() -> None:
+    """The misalignment regression test: the second row's only cell must land
+    in column 1 (its true grid position), not column 0."""
+    d = doc(
+        table(
+            table_row(
+                table_cell(para(text("merged")), attrs={"rowspan": 2}),
+                table_cell(para(text("b1"))),
+            ),
+            table_row(table_cell(para(text("b2")))),
+        )
+    )
+    assert adf_to_markdown(d) == "|  |  |\n| --- | --- |\n| merged | b1 |\n|  | b2 |"
+
+
+def test_row_fully_covered_by_rowspan_still_emitted() -> None:
+    d = doc(
+        table(
+            table_row(table_cell(para(text("tall")), attrs={"rowspan": 2})),
+            table_row(),
+        )
+    )
+    assert adf_to_markdown(d) == "|  |\n| --- |\n| tall |\n|  |"
+
+
+@pytest.mark.parametrize("span", ["x", 0, -1, True, None, 2.5])
+def test_invalid_span_values_treated_as_one(span: Any) -> None:
+    d = doc(
+        table(
+            table_row(
+                table_cell(para(text("a")), attrs={"colspan": span, "rowspan": span}),
+                table_cell(para(text("b"))),
+            ),
+            table_row(table_cell(para(text("x"))), table_cell(para(text("y")))),
+        )
+    )
+    assert adf_to_markdown(d) == "|  |  |\n| --- | --- |\n| a | b |\n| x | y |"
+
+
+def test_table_inside_blockquote_prefixes_every_line() -> None:
+    node = {
+        "type": "blockquote",
+        "content": [
+            table(
+                table_row(table_header(para(text("A")))),
+                table_row(table_cell(para(text("a")))),
+            )
+        ],
+    }
+    assert adf_to_markdown(doc(node)) == "> | A |\n> | --- |\n> | a |"
+
+
+def test_table_non_row_and_non_dict_children_skipped() -> None:
+    row = {
+        "type": "tableRow",
+        "content": ["junk", para(text("stray")), table_cell(para(text("a")))],
+    }
+    d = doc({"type": "table", "content": ["junk", 42, para(text("stray")), row]})
+    assert adf_to_markdown(d) == "|  |\n| --- |\n| a |"
+
+
+def test_colspan_and_rowspan_on_same_cell_reserve_full_block() -> None:
+    """A cell merged in both directions reserves its whole rectangle, so the
+    next row's only cell lands past the merged block rather than inside it.
+    Pins the ``range(col, col + colspan)`` carry footprint at adf.py:_render_table
+    — every other span test sets colspan or rowspan, never both."""
+    d = doc(
+        table(
+            table_row(
+                table_cell(para(text("big")), attrs={"colspan": 2, "rowspan": 2}),
+                table_cell(para(text("c1"))),
+            ),
+            table_row(table_cell(para(text("c2")))),
+            table_row(
+                table_cell(para(text("a3"))),
+                table_cell(para(text("b3"))),
+                table_cell(para(text("c3"))),
+            ),
+        )
+    )
+    assert adf_to_markdown(d) == (
+        "|  |  |  |\n| --- | --- | --- |\n| big |  | c1 |\n|  |  | c2 |\n| a3 | b3 | c3 |"
+    )
+
+
+def test_rowspan_stops_covering_after_it_expires() -> None:
+    """The carry must return to zero: the row below an expired rowspan starts
+    at column 0 again instead of being pushed right by a stale carry."""
+    d = doc(
+        table(
+            table_row(
+                table_cell(para(text("tall")), attrs={"rowspan": 2}),
+                table_cell(para(text("b1"))),
+            ),
+            table_row(table_cell(para(text("b2")))),
+            table_row(table_cell(para(text("a3"))), table_cell(para(text("b3")))),
+        )
+    )
+    assert adf_to_markdown(d) == "|  |  |\n| --- | --- |\n| tall | b1 |\n|  | b2 |\n| a3 | b3 |"
+
+
+def test_rowspan_three_decrements_once_per_row() -> None:
+    """Guards the ``rowspan - 1`` off-by-one across more than one covered row."""
+    d = doc(
+        table(
+            table_row(
+                table_cell(para(text("tall")), attrs={"rowspan": 3}),
+                table_cell(para(text("b1"))),
+            ),
+            table_row(table_cell(para(text("b2")))),
+            table_row(table_cell(para(text("b3")))),
+            table_row(table_cell(para(text("a4"))), table_cell(para(text("b4")))),
+        )
+    )
+    assert adf_to_markdown(d) == (
+        "|  |  |\n| --- | --- |\n| tall | b1 |\n|  | b2 |\n|  | b3 |\n| a4 | b4 |"
+    )
+
+
+def test_row_covered_only_in_a_later_column_pads_the_gap() -> None:
+    """A row whose only coverage sits in column 1 still emits column 0 as an
+    empty cell, so the carried column keeps its true position."""
+    d = doc(
+        table(
+            table_row(
+                table_cell(para(text("a"))),
+                table_cell(para(text("tall")), attrs={"rowspan": 2}),
+            ),
+            table_row(),
+        )
+    )
+    assert adf_to_markdown(d) == "|  |  |\n| --- | --- |\n| a | tall |\n|  |  |"
+
+
+def test_oversized_colspan_clamps_to_max_span() -> None:
+    """A corrupt colspan clamps to _MAX_TABLE_SPAN rather than collapsing to 1:
+    the filler-cell ceiling is preserved without shifting the rest of the row."""
+    d = doc(table(table_row(table_cell(para(text("a")), attrs={"colspan": 10**6}))))
+    assert adf_to_markdown(d) == "\n".join(
+        [
+            "| " + " | ".join([""] * 20) + " |",
+            "| " + " | ".join(["---"] * 20) + " |",
+            "| " + " | ".join(["a", *[""] * 19]) + " |",
+        ]
+    )
+
+
+def test_short_first_row_is_not_promoted_and_stays_short() -> None:
+    """An unpromoted first row is a body row: it is left short like its
+    siblings, and the synthesized header alone carries the full width."""
+    d = doc(
+        table(
+            table_row(table_cell(para(text("a")))),
+            table_row(
+                table_cell(para(text("b"))),
+                table_cell(para(text("c"))),
+                table_cell(para(text("d"))),
+            ),
+        )
+    )
+    assert adf_to_markdown(d) == "|  |  |  |\n| --- | --- | --- |\n| a |\n| b | c | d |"
+
+
+def test_short_header_row_is_padded_to_the_widest_row() -> None:
+    """A promoted header row IS padded — GFM needs it to match the delimiter."""
+    d = doc(
+        table(
+            table_row(table_header(para(text("A")))),
+            table_row(table_cell(para(text("a"))), table_cell(para(text("b")))),
+        )
+    )
+    assert adf_to_markdown(d) == "| A |  |\n| --- | --- |\n| a | b |"
+
+
+def test_oversized_rowspan_clamps_to_row_count_and_keeps_column() -> None:
+    """A rowspan past _MAX_TABLE_SPAN must not collapse to 1 — that would slide
+    every row below the merge one column left, under the wrong header."""
+    rows = [
+        table_row(table_header(para(text("Group"))), table_header(para(text("Req")))),
+        table_row(
+            table_cell(para(text("Auth")), attrs={"rowspan": 25}),
+            table_cell(para(text("R1"))),
+        ),
+    ]
+    rows += [table_row(table_cell(para(text(f"R{i}")))) for i in range(2, 26)]
+    out = adf_to_markdown(doc(table(*rows)))
+    assert out is not None
+    lines = out.splitlines()
+    assert lines[0] == "| Group | Req |"
+    assert lines[2] == "| Auth | R1 |"
+    assert lines[3] == "|  | R2 |"
+    assert lines[-1] == "|  | R25 |"
 
 
 # ---------- graceful fallback ----------

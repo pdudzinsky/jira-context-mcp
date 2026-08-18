@@ -346,6 +346,19 @@ def test_render_ticket_content_renders_comment_with_blockquoted_body() -> None:
     assert "> line 1\n>\n> line 2" in out
 
 
+def test_render_ticket_content_comment_with_table_body_prefixes_every_line() -> None:
+    """A GFM pipe table in a comment body must survive the per-line '> '
+    blockquote prefix — the production re-embedding path for ADF tables."""
+    t = make_ticket("FOO-1")
+    c = Comment(
+        author="Bob",
+        created=datetime(2026, 4, 22, 14, 5, tzinfo=UTC),
+        body_md="| A | B |\n| --- | --- |\n| a | b |",
+    )
+    out = render_ticket_content(t, checklist=None, comments=[c], include_comments=True)
+    assert "> | A | B |\n> | --- | --- |\n> | a | b |" in out
+
+
 # ===================================================================
 # render_attachments
 # ===================================================================

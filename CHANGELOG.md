@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **ADF `table` support** — tables render as GitHub-flavored pipe tables (closes the gap noted in 0.2.0). A first row of all `tableHeader` cells becomes the header; otherwise a blank header is synthesized and no data row is promoted. `tableHeader` cells elsewhere (row-scoped / first-column headers) render **bold**. Cell content is flattened onto one line (`<br>` for line breaks, `\|`-escaped pipes); embedded media still resolves to `[attachment: filename (id=…)]`. `colspan` / `rowspan` merges are preserved positionally via empty filler cells; oversized spans clamp (`colspan` to 20, `rowspan` to the table's content length) instead of collapsing to 1, which would slide every later cell out of its column. Ragged rows size the header row, not every row — GFM fills short body rows in itself, and padding them all would make the emitted cell count `rows x widest row`. Presentation attrs (`layout`, `width`, `isNumberColumnEnabled`, `colwidth`, `background`, `localId`) are ignored — rationale in `_render_table`.
+
 ## [0.2.0] - 2026-05-23
 
 First tagged release. Consolidates the initial development cycle — scaffolding, the composable 3-tool architecture, and the v3 Smart Checklist parser — with the new attachment-handling tool and its supporting metadata.

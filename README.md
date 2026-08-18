@@ -367,7 +367,7 @@ else:
 - **Jira Cloud only.** No Jira Server / Data Center support.
 - **Smart Checklist progress:** v3+ bullet-list checklists display as `(N items)` even when some items are marked done in Jira UI. Legacy `[x]` / `[-]` / `[~]` markers display correctly as `(N/M done)`. Accurate v3+ progress is on the roadmap.
 - **`depth_down` is capped at 3.** Asking for more is silently clamped. The focus ticket and its direct ancestors are always reachable in the tree, even when the focus sits below `depth_down` levels (the spine is always expanded).
-- **ADF coverage:** `panel` and `table` nodes render as `[unsupported: <type>]` — add a handler in `src/jira_context_mcp/adf.py` if you need them. Full list of supported types in CHANGELOG.
+- **ADF coverage:** any node type the walker doesn't handle renders as `[unsupported: <type>]` rather than being silently dropped. Still unhandled: `panel`, `expand`, `nestedExpand`, `status`, `date`, `taskList`, `decisionList`, `layoutSection`, `embedCard`, `blockCard`, `extension` / `bodiedExtension`, `placeholder` — add a handler in `src/jira_context_mcp/adf.py` if you need them. `nestedExpand`, `status` and `date` are the ones worth knowing about, since they turn up inside table cells. Tables render as GFM pipe tables: cell content is flattened onto one line (`<br>` for line breaks, escaped pipes, blank lines dropped) and `colspan` / `rowspan` merges are preserved positionally with empty filler cells. Full list of supported types in CHANGELOG.
 - **Attachment fetch is per-call, not cached.** Every `get_ticket_attachment` call re-fetches the ticket metadata plus the file. For typical "look at one design and move on" flows that's fine; for repeated reads of the same file, expect the latency cost.
 - **Attachment mime support is curated.** `image/*`, `application/pdf`, and `text/*` round-trip through native MCP content types; anything else returns an `Error: unsupported mime …` with the original `content_url`. The model can suggest a manual download, but `.docx` / `.xlsx` / `.zip` / video won't reach the conversation directly.
 - **Attachment download is not retried.** Unlike the main JSON-API calls, attachment streams skip the retry loop — sporadic 5xx on the download path surface as a single `Error: Jira request failed`. Re-run the tool call if you suspect a transient failure.
@@ -385,7 +385,7 @@ uv run python -m jira_context_mcp  # stdio server — blocks waiting for MCP han
 Run the test suite, linter, and type checker:
 
 ```bash
-uv run pytest                       # 234 tests, ~1.8s
+uv run pytest                       # 270 tests, ~2s
 uv run ruff check src tests         # lint
 uv run ruff format src tests        # format (auto-applies)
 uv run ruff format --check src tests  # format check (CI-style)

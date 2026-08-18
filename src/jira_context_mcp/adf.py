@@ -3,9 +3,15 @@
 Minimal walker that handles the node types commonly used in Jira issue
 descriptions and comments: ``paragraph``, ``heading``, ``bulletList``,
 ``orderedList``, ``listItem``, ``codeBlock``, ``blockquote``, ``rule``,
+``table`` / ``tableRow`` / ``tableHeader`` / ``tableCell``,
 ``text`` (with ``strong``, ``em``, ``code``, ``strike``, ``link`` marks),
 ``hardBreak``, ``mention``, ``emoji``, ``inlineCard``, and ``mediaSingle`` /
 ``mediaGroup`` / ``media`` / ``mediaInline``.
+
+Tables render as GitHub-flavored pipe tables; cell content is flattened
+onto one line (``<br>`` for line breaks, literal pipes escaped). Header
+detection and ``colspan`` / ``rowspan`` handling are documented on
+:func:`_render_table`.
 
 Media nodes are resolved against the surrounding ticket's attachment list
 so the LLM sees the filename of every embedded image and the id it needs
@@ -183,6 +189,8 @@ def _render_block(node: _AdfNode, ctx: _RenderContext) -> str:
         return "\n\n".join(_render_blocks(content, ctx))
     if node_type == "rule":
         return "---"
+    if node_type == "table":
+        return _render_table(content, ctx)
     if node_type in ("mediaSingle", "mediaGroup"):
         # Wrappers — descend into inner media node(s) so we can resolve attrs.id
         # against the attachment list. mediaGroup may carry multiple files;
@@ -221,6 +229,172 @@ def _render_list(items: list[_AdfNode], *, bullet: bool, ctx: _RenderContext) ->
         for line in rest:
             lines.append(f"  {line}" if line else "")
     return "\n".join(lines)
+
+
+# Upper bound for honored ``colspan``. Real Jira tables stay in single digits;
+# a corrupt attr with a six-digit span must not emit a million filler cells, so
+# oversized values clamp to this bound. Clamping rather than degrading to 1
+# matters: a cell that shrinks to a single column drags every later cell in the
+# row out of position — exactly the misalignment the carry grid exists to
+# prevent. A rowspan needs no constant of its own; it lives in the carry map
+# and is consumed one row at a time, materialising nothing, so the length of
+# the table's own content is a sufficient bound.
+_MAX_TABLE_SPAN: Final = 20
+
+
+def _render_table(rows: list[_AdfNode], ctx: _RenderContext) -> str:
+    """Render a ``table`` node as a GitHub-flavored pipe table.
+
+    Header rule: the first emitted grid row becomes the GFM header iff every
+    cell in it is a ``tableHeader``; otherwise a blank header row is
+    synthesized and every ADF row renders as data — promoting a data row into
+    the header slot would misrepresent the table's schema. ``tableHeader``
+    cells outside the header row (row-scoped / first-column headers) degrade
+    to ``**bold**`` cell content; cells in the real header row are not
+    bolded (GFM headers already render emphasized).
+
+    ``colspan`` / ``rowspan`` cannot be expressed in GFM, but ignoring them
+    would shift later cells into the wrong columns, because ADF omits the
+    covered cells entirely. A carry grid keeps every cell at its true
+    column: merged content appears once, at its top-left grid position, and
+    the covered slots become empty filler cells. Spans below 2, or of the
+    wrong type, count as 1; oversized spans clamp rather than collapse —
+    ``colspan`` to :data:`_MAX_TABLE_SPAN`, ``rowspan`` to the length of the
+    table's ``content`` — an upper bound on its rows, and a rowspan can never
+    outlive the table.
+
+    Only the row that becomes the header is padded out to the widest row.
+    GFM requires just the header and its delimiter to agree in cell count and
+    fills short body rows in itself, whereas padding every row would make the
+    emitted cell count ``rows x widest row`` — one abnormally wide row would
+    then multiply across the whole table. Presentation attrs are intentionally
+    ignored, same policy as ``attrs.order`` on ``orderedList``: ``layout``,
+    ``width`` and ``isNumberColumnEnabled`` on the table, ``colwidth`` and
+    ``background`` on cells, ``localId`` everywhere — none of them carry
+    content, and markdown renderers lay tables out themselves.
+    """
+    grid: list[list[tuple[str, bool]]] = []
+    carry: dict[int, int] = {}  # column index -> rows still covered by a rowspan
+    for row in rows:
+        if not isinstance(row, dict) or row.get("type") != "tableRow":
+            continue
+        rendered: list[tuple[str, bool]] = []
+        new_spans: dict[int, int] = {}
+        own_cells = 0
+        covered = False
+        col = 0
+        for cell in row.get("content") or []:
+            if not isinstance(cell, dict) or cell.get("type") not in (
+                "tableHeader",
+                "tableCell",
+            ):
+                continue
+            while carry.get(col, 0) > 0:
+                rendered.append(("", False))
+                carry[col] -= 1
+                covered = True
+                col += 1
+            is_header = cell.get("type") == "tableHeader"
+            cell_attrs = cell.get("attrs") or {}
+            colspan = _clamp_table_span(cell_attrs.get("colspan"))
+            # A rowspan can never outlive the table, so the content length
+            # bounds it. Non-row children inflate that bound harmlessly — it
+            # only has to be finite, unlike the filler-cell ceiling a colspan
+            # needs.
+            rowspan = _clamp_table_span(cell_attrs.get("rowspan"), cap=len(rows))
+            rendered.append((_render_table_cell(cell, ctx), is_header))
+            rendered.extend(("", is_header) for _ in range(colspan - 1))
+            if rowspan > 1:
+                for spanned in range(col, col + colspan):
+                    new_spans[spanned] = rowspan - 1
+            own_cells += 1
+            col += colspan
+        # Consume carry that extends past the last own cell so a row fully
+        # covered by a rowspan from above still emits at its true width.
+        max_carry_col = max((c for c, n in carry.items() if n > 0), default=-1)
+        while col <= max_carry_col:
+            if carry.get(col, 0) > 0:
+                carry[col] -= 1
+                covered = True
+            rendered.append(("", False))
+            col += 1
+        # New spans register only after the row — a span must not cover
+        # its own origin row.
+        for spanned, remaining in new_spans.items():
+            carry[spanned] = remaining
+        if own_cells or covered:
+            grid.append(rendered)
+    if not grid:
+        # No emitted rows -> empty string -> the node vanishes upstream in
+        # _render_blocks, same as an empty heading or blockquote. Markers
+        # are for lost data; an empty table has none.
+        return ""
+
+    promote = all(is_header for _, is_header in grid[0])
+    width = max(len(cells) for cells in grid)
+    if promote:
+        # Only the row that becomes the header needs the table's full width.
+        # A synthesized header is built at ``width`` already, so an unpromoted
+        # first row stays a body row and is left short like its siblings.
+        grid[0] = grid[0] + [("", False)] * (width - len(grid[0]))
+
+    def _pipe_row(cells: list[str]) -> str:
+        return "| " + " | ".join(cells) + " |"
+
+    header = [cell_text for cell_text, _ in grid[0]] if promote else [""] * width
+    body = grid[1:] if promote else grid
+    lines = [_pipe_row(header), _pipe_row(["---"] * width)]
+    lines.extend(
+        _pipe_row(
+            [
+                f"**{cell_text}**" if is_header and cell_text else cell_text
+                for cell_text, is_header in cells
+            ]
+        )
+        for cells in body
+    )
+    return "\n".join(lines)
+
+
+def _render_table_cell(cell: _AdfNode, ctx: _RenderContext) -> str:
+    """Flatten a table cell's block content onto one physical line.
+
+    GFM allows only inline content in a cell, while ADF cells hold full
+    blocks. Blocks render through the normal walker — so marks, media
+    resolution, and ``heading_offset`` behave exactly as outside tables —
+    then every line break that separates content, within and between
+    blocks, degrades to ``<br>``. Lines are ``rstrip``-ed (drops the
+    two-space hardBreak artifact) but keep leading indentation so flattened
+    code blocks and nested lists stay readable. Whitespace-only lines are
+    dropped rather than emitted as a second ``<br>`` — once a cell is a
+    single physical line a run of breaks carries no information, so a blank
+    line inside a flattened code block does not survive. Pipes are escaped
+    last, on the whole flattened string, so the row structure survives any
+    cell content.
+    """
+    lines = [
+        stripped
+        for block in _render_blocks(cell.get("content") or [], ctx)
+        for line in block.splitlines()
+        if (stripped := line.rstrip())
+    ]
+    return "<br>".join(lines).replace("|", "\\|")
+
+
+def _clamp_table_span(value: Any, cap: int = _MAX_TABLE_SPAN) -> int:
+    """Coerce a raw ``colspan`` / ``rowspan`` attr to a usable span.
+
+    Anything that is not a plain ``int`` counts as 1 — including ``bool``,
+    which is an ``int`` subclass and would otherwise slip ``True`` through —
+    as does any value below 2. Oversized values clamp to ``cap`` rather than
+    degrading to 1: a merged cell that collapses to a single column displaces
+    every later cell in its row, which is the misalignment the carry grid
+    exists to prevent. Callers pass the ``cap`` that suits the axis — see
+    :data:`_MAX_TABLE_SPAN` for why the two differ.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 1
+    return min(value, cap) if value >= 2 else 1
 
 
 def _render_inline(content: list[_AdfNode], ctx: _RenderContext) -> str:

@@ -75,7 +75,7 @@ async def test_get_issue_tree_schema() -> None:
 
     tools = await mcp.list_tools()
     tool = next(t for t in tools if t.name == "get_issue_tree")
-    schema = tool.to_mcp_tool().inputSchema
+    schema = tool.to_mcp_tool().input_schema
     props = schema["properties"]
     assert "issue_key" in props
     assert "depth_up" in props
@@ -89,7 +89,7 @@ async def test_get_ticket_content_schema() -> None:
 
     tools = await mcp.list_tools()
     tool = next(t for t in tools if t.name == "get_ticket_content")
-    schema = tool.to_mcp_tool().inputSchema
+    schema = tool.to_mcp_tool().input_schema
     props = schema["properties"]
     assert "issue_key" in props
     assert "include_comments" in props
@@ -102,7 +102,7 @@ async def test_get_smart_checklist_schema() -> None:
 
     tools = await mcp.list_tools()
     tool = next(t for t in tools if t.name == "get_smart_checklist")
-    schema = tool.to_mcp_tool().inputSchema
+    schema = tool.to_mcp_tool().input_schema
     assert "issue_key" in schema["properties"]
     assert schema.get("required") == ["issue_key"]
 
@@ -113,7 +113,7 @@ async def test_get_ticket_attachment_schema() -> None:
 
     tools = await mcp.list_tools()
     tool = next(t for t in tools if t.name == "get_ticket_attachment")
-    schema = tool.to_mcp_tool().inputSchema
+    schema = tool.to_mcp_tool().input_schema
     props = schema["properties"]
     assert "issue_key" in props
     assert "attachment_id" in props
@@ -354,7 +354,7 @@ class TestGetTicketAttachment:
         assert result.data == b"PNGBYTES"
         # FastMCP stores the format in a private slot; round-trip through the
         # MCP content converter to verify the mime survives end-to-end.
-        assert result.to_image_content().mimeType == "image/png"
+        assert result.to_image_content().mime_type == "image/png"
 
     async def test_pdf_returns_native_file_payload(self, base_url: str) -> None:
         from fastmcp.utilities.types import File
@@ -382,7 +382,9 @@ class TestGetTicketAttachment:
         # Round-trip through the MCP content converter to verify the mime
         # survives end-to-end; FastMCP's File stores format/name privately.
         embedded = result.to_resource_content()
-        assert embedded.resource.mimeType == "application/pdf"
+        assert embedded.resource.mime_type == "application/pdf"
+        # The filename already carries the extension; the URI must not double it.
+        assert str(embedded.resource.uri) == "file:///spec.pdf"
 
     async def test_text_returns_markdown_string(self, base_url: str) -> None:
         from jira_context_mcp.server import get_ticket_attachment
@@ -559,7 +561,7 @@ class TestGetTicketAttachment:
             )
             result = await get_ticket_attachment(issue_key="FOO-1", attachment_id="S")
         assert isinstance(result, Image)
-        assert result.to_image_content().mimeType == "image/svg+xml"
+        assert result.to_image_content().mime_type == "image/svg+xml"
 
     async def test_401_during_download_returns_auth_error(self, base_url: str) -> None:
         from jira_context_mcp.server import get_ticket_attachment

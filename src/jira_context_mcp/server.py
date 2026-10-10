@@ -21,6 +21,7 @@ explore.
 from __future__ import annotations
 
 import asyncio
+from importlib.metadata import PackageNotFoundError, version
 
 from fastmcp import FastMCP
 from fastmcp.utilities.types import File, Image
@@ -59,7 +60,22 @@ _IMAGE_FORMATS: dict[str, str] = {
     "image/svg+xml": "svg+xml",
 }
 
-mcp: FastMCP = FastMCP("jira-context-mcp")
+
+def _server_version() -> str:
+    """Return the version reported to MCP clients in ``serverInfo``.
+
+    Read from the installed package metadata so ``pyproject.toml`` stays the
+    single source of truth. Left unset, FastMCP reports its *own* version,
+    which tracks the library rather than this server.
+    """
+    try:
+        return version("jira-context-mcp")
+    except PackageNotFoundError:
+        # Source tree on ``PYTHONPATH`` without an install: no metadata to read.
+        return "0+unknown"
+
+
+mcp: FastMCP = FastMCP("jira-context-mcp", version=_server_version())
 
 
 # ---------------------------------------------------------------------------

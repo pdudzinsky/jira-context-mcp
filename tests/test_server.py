@@ -51,6 +51,35 @@ def _ticket_payload_with_attachments(key: str, attachments: list[dict[str, Any]]
 
 
 # ===================================================================
+# Server metadata
+# ===================================================================
+
+
+@pytest.mark.usefixtures("jira_env")
+def test_server_reports_package_version() -> None:
+    """``serverInfo`` must carry this package's version, not FastMCP's own."""
+    from importlib.metadata import version
+
+    from jira_context_mcp.server import mcp
+
+    assert mcp.version == version("jira-context-mcp")
+
+
+def test_server_version_falls_back_without_package_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from importlib.metadata import PackageNotFoundError
+
+    from jira_context_mcp import server
+
+    def _missing(name: str) -> str:
+        raise PackageNotFoundError(name)
+
+    monkeypatch.setattr(server, "version", _missing)
+    assert server._server_version() == "0+unknown"
+
+
+# ===================================================================
 # Tool registration & schemas
 # ===================================================================
 

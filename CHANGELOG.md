@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **FastMCP 4 / MCP SDK v2** — the dependency range moves from `fastmcp>=3.0.0` to `fastmcp>=4.0.0,<5`. The old range had no upper bound, so installs that don't read `uv.lock` (`uvx`, `pip`) were already resolving to FastMCP 4, untested; the cap makes the next major an explicit decision. The migration needed no source changes: tool names, input / output schemas, descriptions and text / image results are unchanged. What clients can observe: tool definitions additionally carry FastMCP 4's auto-generated `title` (e.g. `Get Issue Tree`); a PDF attachment's embedded-resource `uri` no longer doubles the extension (`file:///spec.pdf.pdf` → `file:///spec.pdf`); and the `initialize` capabilities now advertise `prompts.listChanged` / `resources.listChanged` as `true` and drop the empty `experimental` / `extensions` entries. Tests read the SDK v2 snake_case fields (`input_schema`, `mime_type`) in place of the deprecated camelCase ones. The mypy pre-commit hook's copy of the range is updated to match.
 
+### Fixed
+- **`serverInfo.version` reports this package's version** — the MCP handshake previously advertised FastMCP's own version (e.g. `4.1.0`), because the server was constructed without one. It is now read from the installed package metadata, so `pyproject.toml` stays the single source of truth; a source tree run without an install reports `0+unknown`.
+
 ## [0.2.0] - 2026-05-23
 
 First tagged release. Consolidates the initial development cycle — scaffolding, the composable 3-tool architecture, and the v3 Smart Checklist parser — with the new attachment-handling tool and its supporting metadata.

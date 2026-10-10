@@ -411,7 +411,7 @@ uv run python -m jira_context_mcp  # stdio server — blocks waiting for MCP han
 Run the test suite, linter, and type checker:
 
 ```bash
-uv run pytest                       # 270 tests, ~2s
+uv run pytest                       # 272 tests, ~2s
 uv run ruff check src tests         # lint
 uv run ruff format src tests        # format (auto-applies)
 uv run ruff format --check src tests  # format check (CI-style)

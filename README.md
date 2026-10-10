@@ -140,17 +140,39 @@ Rule of thumb: **pick Rovo** for write actions or multi-product team workflows; 
 
 ## Install
 
+Two ways to run the server. Both end in the same MCP client config block — only `command` / `args` differ.
+
+### Straight from GitHub with `uvx` (recommended)
+
+Nothing to clone or install up front. `uvx` fetches the repo into uv's cache, builds it into an isolated environment, and runs the `jira-context-mcp` entry point:
+
+```bash
+uvx --from git+https://github.com/pdudzinsky/jira-context-mcp@main jira-context-mcp
+```
+
+Run by hand, this blocks waiting for an MCP handshake — that means it works (`Ctrl+D` to quit). In practice your MCP client runs it for you; see the config below.
+
+`uvx` re-checks the `main` branch on every launch, so **restarting your MCP client is all it takes to pick up a new commit** — no `git pull`. The trade-offs:
+
+- **GitHub and PyPI must be reachable at launch.** The branch check is a `git fetch`; if it fails, the server doesn't start. It adds about a second to startup (the very first launch is slower — it builds the environment).
+- **`uv.lock` is not used.** Dependencies are resolved again on every launch, to the newest versions allowed by the ranges in `pyproject.toml` — so a new dependency release is picked up at the next restart even without a new commit.
+- **To freeze the code**, replace `@main` with a tag or a commit SHA. That pins the code only; for frozen dependencies too, run from a local clone.
+
+### From a local clone
+
+Use this to hack on the server, or to run exactly the dependency versions pinned in `uv.lock`:
+
 ```bash
 git clone https://github.com/pdudzinsky/jira-context-mcp.git
 cd jira-context-mcp
 uv sync
 ```
 
-`uv sync` creates `.venv/` and installs everything from the committed `uv.lock`. No activation needed — the launchers below use `uv run` which handles it.
+`uv sync` creates `.venv/` and installs everything from the committed `uv.lock`. No activation needed — `uv run` handles it. Updating means `git pull`.
 
 ## Configure your MCP client
 
-The server needs three required environment variables — `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` — plus a handful of optional ones. Provide them either inline in the MCP client config (recommended) or via a `.env` file in the repo (see `.env.example`).
+The server needs three required environment variables — `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` — plus a handful of optional ones. Provide them either inline in the MCP client config (recommended) or, when running from a local clone, via a `.env` file in the repo (see `.env.example`).
 
 | Variable | Required | Default | Notes |
 |---|---|---|---|
@@ -169,14 +191,11 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 {
   "mcpServers": {
     "jira-context-mcp": {
-      "command": "uv",
+      "command": "uvx",
       "args": [
-        "run",
-        "--directory",
-        "/absolute/path/to/jira-context-mcp",
-        "python",
-        "-m",
-        "jira_context_mcp"
+        "--from",
+        "git+https://github.com/pdudzinsky/jira-context-mcp@main",
+        "jira-context-mcp"
       ],
       "env": {
         "JIRA_BASE_URL": "https://your-org.atlassian.net",
@@ -188,13 +207,20 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
+Running from a local clone instead? Keep `env` and swap the launcher:
+
+```json
+"command": "uv",
+"args": ["run", "--directory", "/absolute/path/to/jira-context-mcp", "python", "-m", "jira_context_mcp"],
+```
+
 > **Heads-up on tokens:** Atlassian API tokens are ~192 characters of `base64`-ish goo. If you paste one and your line wraps in the JSON editor, whitespace can sneak into the middle of the string — Jira will then silently return 404 on private projects. Paste carefully, or strip the value through `tr -d '[:space:]'` before saving.
 
 Quit Claude Desktop fully (`Cmd+Q`, not just close the window) and reopen. The four tools should appear in the available-tools list.
 
 ### Other MCP clients
 
-Any client that supports stdio-based MCP servers works the same way — point `command` at `uv run ... python -m jira_context_mcp` and provide the three env vars. Cursor's `.cursor/mcp.json`, Zed's `settings.json`, and `fastmcp dev` all use the same shape.
+Any client that supports stdio-based MCP servers works the same way — point `command` / `args` at `uvx --from git+https://github.com/pdudzinsky/jira-context-mcp@main jira-context-mcp` (or at `uv run --directory ... python -m jira_context_mcp` for a local clone) and provide the three env vars. Cursor's `.cursor/mcp.json`, Zed's `settings.json`, and `fastmcp dev` all use the same shape.
 
 ### Local `.env` alternative
 
@@ -203,7 +229,7 @@ cp .env.example .env
 $EDITOR .env
 ```
 
-`.env` is git-ignored. It's loaded when the process is launched with `--directory` pointing at the repo root.
+`.env` is git-ignored. It's read from the process's working directory, so it applies to the local-clone launch (`--directory` pointing at the repo root) — with `uvx`, pass the variables through the client config instead.
 
 ## Usage
 

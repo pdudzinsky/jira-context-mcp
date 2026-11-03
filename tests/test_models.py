@@ -190,6 +190,20 @@ def test_attachment_naive_datetime_rejected() -> None:
     assert "timezone-aware" in str(exc.value)
 
 
+def test_attachment_empty_content_url_rejected() -> None:
+    """An empty URL would make ``download_attachment`` fetch the Jira home page with auth."""
+    with pytest.raises(ValidationError):
+        Attachment(
+            id="1",
+            filename="f",
+            mime_type="image/png",
+            size=0,
+            created=datetime(2026, 1, 1, tzinfo=UTC),
+            author="a",
+            content_url="",
+        )
+
+
 def test_attachment_is_frozen() -> None:
     a = Attachment(
         id="1",

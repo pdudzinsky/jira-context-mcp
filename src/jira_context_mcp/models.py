@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ChecklistStatus = Literal["open", "done", "in_progress", "skipped"]
 """Canonical Smart Checklist item states. The parser in ``jira`` maps any
@@ -79,8 +79,10 @@ class Attachment(_Frozen):
 
     ``content_url`` is the authenticated download URL Jira returns in the
     ``attachment.content`` field. Fetching it requires the same BasicAuth
-    used by :class:`JiraClient`; surface it to readers via the renderer
-    only as informational metadata, not as a click-through link.
+    used by :class:`JiraClient`, so it is not a public link: the renderer
+    shows it as plain text at the end of the attachment line, for readers
+    with Jira access. It is never empty, because ``download_attachment``
+    would resolve an empty URL to the Jira home page and send credentials.
 
     ``embedded`` is ``True`` when this file is referenced by a media node
     inside the surrounding ticket's description (i.e. someone pasted it
@@ -96,7 +98,7 @@ class Attachment(_Frozen):
     size: int
     created: datetime
     author: str
-    content_url: str
+    content_url: str = Field(min_length=1)
     embedded: bool = False
 
     @field_validator("created")

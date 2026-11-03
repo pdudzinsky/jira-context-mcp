@@ -77,9 +77,9 @@ The endpoint contract is in the attached PDF — see [attachment: invoice-api.pd
 - [ ] Rollout communication to support
 
 ## Attachments
-- [12347] mockup-invoice-pdf.png · image/png · 412 KB · 2026-05-12 by Piotr D. · embedded
-- [12348] invoice-api.pdf · application/pdf · 2.4 MB · 2026-05-12 by Piotr D. · embedded
-- [12349] revised-mockup-v2.png · image/png · 480 KB · 2026-05-16 by Anna K. · orphan
+- [12347] mockup-invoice-pdf.png · image/png · 412 KB · 2026-05-12 by Piotr D. · embedded · https://your-org.atlassian.net/rest/api/3/attachment/content/12347
+- [12348] invoice-api.pdf · application/pdf · 2.4 MB · 2026-05-12 by Piotr D. · embedded · https://your-org.atlassian.net/rest/api/3/attachment/content/12348
+- [12349] revised-mockup-v2.png · image/png · 480 KB · 2026-05-16 by Anna K. · orphan · https://your-org.atlassian.net/rest/api/3/attachment/content/12349
 
 ## Comments  (only when include_comments=True)
 **2026-04-22 14:05, Piotr D.:**
@@ -90,6 +90,8 @@ Notes:
 - **Attachments section** is omitted entirely when the ticket has none — no `_(no attachments)_` noise.
 - **Embedded media** inside the description (e.g. a pasted screenshot) renders as `[attachment: filename (id=...)]` when the file is also in the attachment list. The id is the same key the model needs for `get_ticket_attachment`.
 - **`embedded` vs `orphan`** marker per attachment: `embedded` means the file is referenced from inside the description body (someone pasted it into the prose); `orphan` means the file is attached to the ticket but never mentioned. Orphan attachments are typically post-review revisions or supplementary material the author chose not to inline — the LLM treats them as lower-priority context unless something in the prose redirects to them.
+- **Attachment URL** is the last field of each line: Jira's `attachment.content` value, verbatim. A value with userinfo, a query, a fragment or whitespace, or one that isn't `http(s)`, could carry a secret or break the line, so it is left out and the line ends at the marker. It isn't a public link — opening it requires Jira authentication — so the model should read images, PDFs and text files via `get_ticket_attachment`.
+- **Parsing these lines in a client:** match `## Attachments` as a whole line and read fields by position (the marker is always the fifth, the URL the optional sixth). Line breaks in a filename, mime type or author collapse to a space, a free-standing `·` becomes `-`, and description lines imitating a section heading are escaped as `\## …`. The description can still contain lines that look like attachment entries, so check a URL's host against `JIRA_BASE_URL` before sending credentials to it.
 
 ### `get_smart_checklist` example
 
@@ -127,7 +129,7 @@ Atlassian ships an official [Rovo MCP Server](https://www.atlassian.com/platform
 - **Multi-level issue hierarchy walk in one call.** `get_issue_tree` traverses parents and children across multiple levels, builds a tree centred on the focus, and renders a status aggregate. Rovo's `getJiraIssue` exposes one ticket at a time including its `parent` field — building the same tree requires multiple calls plus client-side rendering.
 - **Read-only by design.** No `create`, `edit`, or `transition` tools — the API surface can't mutate Jira state, so the LLM can't accidentally close a ticket or edit a description.
 - **Local stdio + API token install.** No OAuth flow, no organisation admin involvement, no managed service. Three env vars, one config block, restart the client. Fits a "personal dev assistant" workflow rather than team-wide automation.
-- **Markdown output, not raw fields.** Tickets render as headings + lists + structured attachment metadata (`[id, filename, mime, size, embedded/orphan]`) — smaller token footprint, and the model can quote and reason over them without parsing nested fields.
+- **Markdown output, not raw fields.** Tickets render as headings + lists + structured attachment metadata (`[id, filename, mime, size, embedded/orphan, url]`) — smaller token footprint, and the model can quote and reason over them without parsing nested fields.
 
 Rule of thumb: **pick Rovo** for write actions or multi-product team workflows; **pick this one** for read-heavy dev workflows, Smart Checklist teams, and attachment-aware ticket context.
 

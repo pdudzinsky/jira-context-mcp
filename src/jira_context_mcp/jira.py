@@ -35,6 +35,9 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+# httpx logs every request URL at INFO, including the attachment redirect target,
+# whose query carries a media ``token``. Keep that out of the host's logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 class JiraError(Exception):

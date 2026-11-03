@@ -6,8 +6,8 @@ Three public entry points:
   :mod:`.tree`) as a fenced ASCII tree plus a short Overview aggregate;
   used by the ``get_issue_tree`` tool.
 - :func:`render_ticket_content` — formats a single ticket's full content
-  (description + Smart Checklist + optional comments); used by the
-  ``get_ticket_content`` tool.
+  (description + Smart Checklist + attachment list + optional comments);
+  used by the ``get_ticket_content`` tool.
 - :func:`render_checklist` / :func:`render_checklist_items` — used both by
   ``render_ticket_content`` and the standalone ``get_smart_checklist`` tool.
 
@@ -16,7 +16,9 @@ All renderers are pure functions of their inputs.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
+from typing import Final
 
 from .models import Attachment, Checklist, ChecklistItem, Comment, Ticket, TreeNode
 
@@ -169,6 +171,14 @@ def _format_tree_line(node: TreeNode, *, prefix: str, branch: str, is_root: bool
 
 # ---------- Single-ticket full content ----------
 
+# The section headings :func:`render_ticket_content` emits. ``heading_offset``
+# moves real ADF headings to level 4 or deeper, so a description line matching
+# this is literal text someone typed, not document structure.
+_SECTION_HEADING_RE: Final = re.compile(
+    r"^([ \t]*)(##[ \t]+(?:Description|Smart Checklist|Attachments|Comments)\b)",
+    re.IGNORECASE,
+)
+
 
 def render_ticket_content(
     ticket: Ticket,
@@ -181,7 +191,8 @@ def render_ticket_content(
 
     Always shows the header (key, type, summary, status, assignee, URL) and
     the description block. Smart Checklist appears only when the ticket
-    actually has items; comments only when ``include_comments`` is true.
+    actually has items; the attachment list only when it has files; comments
+    only when ``include_comments`` is true.
     """
     lines: list[str] = [
         f"# {ticket.key} · [{ticket.issue_type}] {ticket.summary}",
@@ -192,7 +203,7 @@ def render_ticket_content(
         ),
         "",
         "## Description",
-        ticket.description_md or "_(no description)_",
+        _escape_section_headings(ticket.description_md or "_(no description)_"),
     ]
 
     if checklist is not None and checklist.items:
@@ -214,7 +225,25 @@ def render_ticket_content(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _escape_section_headings(description: str) -> str:
+    """Stop description text from passing for one of this document's own sections.
+
+    Clients parse this output and anyone who can edit a ticket controls its
+    description, so a literal ``## Attachments`` line could otherwise introduce
+    a forged attachment list. ``splitlines`` covers every line boundary a
+    client might split on.
+    """
+    return "\n".join(_SECTION_HEADING_RE.sub(r"\1\\\2", line) for line in description.splitlines())
+
+
 # ---------- Attachments ----------
+
+# The only URL shape shown to readers: http(s), with no whitespace, userinfo,
+# query or fragment. Jira's ``attachment.content`` fits it; anything else could
+# carry a secret or break the line, so it is left out rather than cleaned up.
+_SAFE_URL_RE: Final = re.compile(r"https?://[^\s/?#@]+(?:/[^\s?#]*)?")
+# A ``·`` next to whitespace or a field edge would read as a field separator.
+_LOOSE_SEPARATOR_RE: Final = re.compile(r"(?<!\S)·|·(?!\S)")
 
 
 def render_attachments(attachments: tuple[Attachment, ...] | list[Attachment]) -> str:
@@ -228,6 +257,13 @@ def render_attachments(attachments: tuple[Attachment, ...] | list[Attachment]) -
     attached without mention (orphan — usually post-review revisions or
     supplementary material).
 
+    The line ends with ``content_url``, exactly as Jira returned it, as plain
+    text; opening it still requires Jira auth. A value outside
+    :data:`_SAFE_URL_RE` is left out and the line stops at the marker, so the
+    URL is optional but the five fields before it keep their positions.
+    :func:`~.jira._parse_attachments` drops files with no ``content`` before
+    they get here.
+
     Returns an empty string when ``attachments`` is empty so callers can
     treat the result as concatenable without a presence check.
     """
@@ -237,11 +273,21 @@ def render_attachments(attachments: tuple[Attachment, ...] | list[Attachment]) -
     for a in attachments:
         date_str = a.created.strftime("%Y-%m-%d")
         status = "embedded" if a.embedded else "orphan"
+        url_field = f" · {a.content_url}" if _SAFE_URL_RE.fullmatch(a.content_url) else ""
         lines.append(
-            f"- [{a.id}] {a.filename} · {a.mime_type} · "
-            f"{_format_size(a.size)} · {date_str} by {a.author} · {status}"
+            f"- [{a.id}] {_field(a.filename)} · {_field(a.mime_type)} · "
+            f"{_format_size(a.size)} · {date_str} by {_field(a.author)} · {status}{url_field}"
         )
     return "\n".join(lines)
+
+
+def _field(text: str) -> str:
+    """Keep free text from Jira inside its own field of an attachment line.
+
+    Clients parse these lines, so a line break must not be able to start a new
+    entry and a free-standing ``·`` must not shift the fields after it.
+    """
+    return _LOOSE_SEPARATOR_RE.sub("-", " ".join(text.splitlines()))
 
 
 def _format_size(size_bytes: int) -> str:
@@ -254,8 +300,10 @@ def _format_size(size_bytes: int) -> str:
     """
     if size_bytes < 1024:
         return f"{size_bytes} B"
-    if size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.0f} KB"
+    # Compare the rounded value, or just under 1 MiB would read as ``1024 KB``.
+    kilobytes = round(size_bytes / 1024)
+    if kilobytes < 1024:
+        return f"{kilobytes} KB"
     return f"{size_bytes / (1024 * 1024):.1f} MB"
 
 

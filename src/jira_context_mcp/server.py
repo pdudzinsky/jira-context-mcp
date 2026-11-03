@@ -146,10 +146,14 @@ async def get_ticket_content(
 ) -> str:
     """Return the full content of a single Jira ticket as markdown.
 
-    Fetches description (ADF → markdown), Smart Checklist (if present), and
-    optionally the comments thread. Does **not** walk the parent or child
-    hierarchy — pair this with ``get_issue_tree`` when context from siblings
-    or ancestors matters.
+    Fetches description (ADF → markdown), Smart Checklist (if present), the
+    attachment list (if any), and optionally the comments thread. Does **not**
+    walk the parent or child hierarchy — pair this with ``get_issue_tree`` when
+    context from siblings or ancestors matters.
+
+    Each attachment line normally ends with the file's Jira URL. Opening it
+    requires Jira authentication, so read images, PDFs and text files via
+    ``get_ticket_attachment``.
 
     Use this tool when:
     - You already know which ticket you want full detail on
@@ -166,7 +170,8 @@ async def get_ticket_content(
     Returns:
         Markdown with ``# KEY · [Type] Summary``, status/assignee/URL line,
         ``## Description``, optional ``## Smart Checklist``, optional
-        ``## Comments``. ``Error: ...`` line on failure.
+        ``## Attachments``, optional ``## Comments``. ``Error: ...`` line on
+        failure.
     """
     try:
         async with (

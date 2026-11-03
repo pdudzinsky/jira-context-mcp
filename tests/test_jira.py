@@ -491,6 +491,30 @@ class TestAttachmentsParsing:
                 t = await client.get_ticket("FOO-1")
         assert [a.id for a in t.attachments] == ["3"]
 
+    @pytest.mark.parametrize("content", [{}, {"content": None}, {"content": ""}])
+    async def test_attachment_without_content_url_is_skipped_with_warning(
+        self,
+        client_factory,
+        base_url: str,
+        caplog: pytest.LogCaptureFixture,
+        content: dict[str, Any],
+    ) -> None:
+        """The WARN log is the only trace of a dropped file, so it is part of the contract."""
+        broken = _attachment_payload("1")
+        del broken["content"]
+        broken.update(content)
+        payload = _ticket_payload("FOO-1")
+        payload["fields"]["attachment"] = [broken, _attachment_payload("2")]
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/issue/FOO-1").mock(
+                    return_value=httpx.Response(200, json=payload)
+                )
+                with caplog.at_level(logging.WARNING, logger="jira_context_mcp.jira"):
+                    t = await client.get_ticket("FOO-1")
+        assert [a.id for a in t.attachments] == ["2"]
+        assert any("missing id or content URL" in r.message for r in caplog.records)
+
     async def test_get_ticket_empty_or_missing_attachment_returns_empty_tuple(
         self, client_factory, base_url: str
     ) -> None:
@@ -763,3 +787,19 @@ class TestDownloadAttachment:
                 )
                 data, _ = await client.download_attachment(self.CONTENT_URL, max_bytes=1024)
         assert data == b"REDIRECTED"
+
+    async def test_redirect_token_stays_out_of_logs(
+        self, client_factory, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The CDN redirect target carries a media token, whatever level the host logs at."""
+        caplog.set_level(logging.DEBUG)
+        redirect_target = "https://cdn.example.com/blob?token=MEDIA-SECRET"
+        async with client_factory() as client:
+            with respx.mock(assert_all_called=False) as router:
+                router.get(self.CONTENT_URL).mock(
+                    return_value=httpx.Response(303, headers={"Location": redirect_target})
+                )
+                router.get(redirect_target).mock(return_value=httpx.Response(200, content=b"DATA"))
+                data, _ = await client.download_attachment(self.CONTENT_URL, max_bytes=1024)
+        assert data == b"DATA"
+        assert "MEDIA-SECRET" not in caplog.text

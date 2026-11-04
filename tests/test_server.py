@@ -312,8 +312,10 @@ class TestGetTicketContent:
                 return_value=httpx.Response(200, text="<html>down</html>")
             )
             out = await get_ticket_content(issue_key="FOO-1")
-        assert (
-            out == "Error: Jira request failed — checklist property of FOO-1: response is not JSON"
+        assert out == (
+            "Error: Jira request failed — "
+            "GET /rest/api/3/issue/FOO-1/properties/com.railsware.SmartChecklist.checklist "
+            "returned 200 OK, but the body is not the expected JSON"
         )
 
     async def test_checklist_text_cannot_forge_a_ticket_section(self, base_url: str) -> None:
@@ -630,18 +632,6 @@ class TestGetSmartChecklist:
             await get_smart_checklist(issue_key="FOO-1")
         assert not issue.called
 
-    async def test_unexpected_response_is_an_error_and_not_an_empty_checklist(
-        self, base_url: str
-    ) -> None:
-        from jira_context_mcp.server import get_smart_checklist
-
-        with respx.mock(base_url=base_url) as router:
-            router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
-                return_value=httpx.Response(400, json={"errorMessages": ["bad"]})
-            )
-            out = await get_smart_checklist(issue_key="FOO-1")
-        assert out == "Error: Jira request failed — checklist property of FOO-1: HTTP 400"
-
     async def test_401_returns_auth_error(self, base_url: str) -> None:
         from jira_context_mcp.server import get_smart_checklist
 
@@ -651,6 +641,7 @@ class TestGetSmartChecklist:
             )
             out = await get_smart_checklist(issue_key="FOO-1")
         assert out.startswith("Error: Jira authentication failed")
+        assert out.count("JIRA_API_TOKEN") == 1
 
 
 # ===================================================================
@@ -1117,20 +1108,6 @@ class TestLoneSurrogate:
             result = await _call_and_serialize("get_smart_checklist", issue_key="FOO-1")
         assert "item ?" in result.content[0].text
 
-    async def test_error_body_in_an_unusual_charset(self, base_url: str) -> None:
-        """The body of a 5xx is decoded as the response says, and some codecs yield surrogates."""
-        response = httpx.Response(
-            500,
-            content=b"boom \\ud83d",
-            headers={"Content-Type": "text/plain; charset=unicode_escape"},
-        )
-        with respx.mock(base_url=base_url) as router:
-            router.get("/rest/api/3/issue/FOO-1").mock(return_value=response)
-            result = await _call_and_serialize("get_issue_tree", issue_key="FOO-1")
-        text = result.content[0].text
-        assert text.startswith("Error: Jira request failed")
-        assert "boom ?" in text
-
     async def test_complete_pair_stays_one_character(self, base_url: str) -> None:
         issue = _ticket_payload("FOO-1")
         issue["fields"]["summary"] = "summary 😀"  # ``json.dumps`` spells it as two escapes.
@@ -1141,6 +1118,370 @@ class TestLoneSurrogate:
             )
             result = await _call_and_serialize("get_ticket_content", issue_key="FOO-1")
         assert "summary 😀" in result.content[0].text
+
+
+# ===================================================================
+# Responses that must not pass for an empty answer or escape as an exception
+# ===================================================================
+
+
+@pytest.mark.usefixtures("jira_env", "no_sleep")
+class TestUnusableResponses:
+    async def test_comments_400_is_not_an_empty_thread(self, base_url: str) -> None:
+        from jira_context_mcp.server import get_ticket_content
+
+        with respx.mock(base_url=base_url, assert_all_called=False) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(
+                return_value=httpx.Response(200, json=_ticket_payload("FOO-1"))
+            )
+            router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
+                return_value=httpx.Response(404, json={})
+            )
+            router.get("/rest/api/3/issue/FOO-1/comment").mock(
+                return_value=httpx.Response(400, json={"errorMessages": ["nope"]})
+            )
+            out = await get_ticket_content(issue_key="FOO-1", include_comments=True)
+        assert out == (
+            "Error: Jira request failed — "
+            "GET /rest/api/3/issue/FOO-1/comment returned 400 Bad Request"
+        )
+
+    async def test_children_400_is_not_a_childless_tree(self, base_url: str) -> None:
+        from jira_context_mcp.server import get_issue_tree
+
+        with respx.mock(base_url=base_url) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(
+                return_value=httpx.Response(200, json=_ticket_payload("FOO-1"))
+            )
+            router.post("/rest/api/3/search/jql").mock(
+                return_value=httpx.Response(400, json={"errorMessages": ["nope"]})
+            )
+            out = await get_issue_tree(issue_key="FOO-1")
+        assert out == (
+            "Error: Jira request failed — POST /rest/api/3/search/jql returned 400 Bad Request"
+        )
+
+    async def test_unreadable_search_page_is_not_reported_as_a_cycle(self, base_url: str) -> None:
+        """``get_issue_tree`` reads any ``ValueError`` as a cycle, and bad JSON is one."""
+        from jira_context_mcp.server import get_issue_tree
+
+        with respx.mock(base_url=base_url) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(
+                return_value=httpx.Response(200, json=_ticket_payload("FOO-1"))
+            )
+            router.post("/rest/api/3/search/jql").mock(
+                return_value=httpx.Response(200, text="<html>Sign in</html>")
+            )
+            out = await get_issue_tree(issue_key="FOO-1")
+        assert out.startswith(
+            "Error: Jira request failed — POST /rest/api/3/search/jql returned 200 OK, but"
+        )
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            pytest.param({"status_code": 400, "json": {"errorMessages": ["x"]}}, id="400-json"),
+            pytest.param({"status_code": 400, "text": "<html>Bad</html>"}, id="400-html"),
+            pytest.param({"status_code": 410, "json": {}}, id="410"),
+            pytest.param(
+                {"status_code": 302, "headers": {"Location": "https://elsewhere.test"}}, id="302"
+            ),
+            pytest.param({"status_code": 200, "text": "<html>Sign in</html>"}, id="200-html"),
+            pytest.param({"status_code": 200, "content": b'{"key": "caf\xe9"}'}, id="200-not-utf8"),
+            pytest.param({"status_code": 200, "json": {}}, id="200-no-key"),
+            pytest.param({"status_code": 200, "json": []}, id="200-array"),
+            pytest.param({"status_code": 200, "json": {"key": 1}}, id="200-key-not-str"),
+            pytest.param({"status_code": 204}, id="204"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("tool", "kwargs"),
+        [
+            ("get_issue_tree", {}),
+            ("get_ticket_content", {"include_comments": True}),
+            ("get_ticket_attachment", {"attachment_id": "1"}),
+        ],
+    )
+    async def test_unusable_issue_response_comes_back_as_error_text(
+        self, base_url: str, tool: str, kwargs: dict[str, Any], response: dict[str, Any]
+    ) -> None:
+        from jira_context_mcp import server
+
+        # ``get_ticket_content`` fetches concurrently, so a failure may cancel the other requests.
+        with respx.mock(base_url=base_url, assert_all_called=False) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(return_value=httpx.Response(**response))
+            router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
+                return_value=httpx.Response(404, json={})
+            )
+            router.get("/rest/api/3/issue/FOO-1/comment").mock(
+                return_value=httpx.Response(200, json={"comments": []})
+            )
+            out = await getattr(server, tool)(issue_key="FOO-1", **kwargs)
+        assert out.startswith("Error: Jira request failed — GET /rest/api/3/issue/FOO-1 returned ")
+
+    async def test_smart_checklist_400_is_not_an_empty_checklist(self, base_url: str) -> None:
+        from jira_context_mcp.server import get_smart_checklist
+
+        path = CHECKLIST_PATH.format(key="FOO-1")
+        with respx.mock(base_url=base_url) as router:
+            router.get(path).mock(return_value=httpx.Response(400, json={}))
+            out = await get_smart_checklist(issue_key="FOO-1")
+        assert out == f"Error: Jira request failed — GET {path} returned 400 Bad Request"
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            pytest.param({"text": "<html>Sign in</html>"}, id="html"),
+            pytest.param({"json": []}, id="array"),
+        ],
+    )
+    async def test_unreadable_smart_checklist_comes_back_as_error_text(
+        self, base_url: str, response: dict[str, Any]
+    ) -> None:
+        from jira_context_mcp.server import get_smart_checklist
+
+        with respx.mock(base_url=base_url) as router:
+            router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
+                return_value=httpx.Response(200, **response)
+            )
+            out = await get_smart_checklist(issue_key="FOO-1")
+        assert out.startswith("Error: Jira request failed — ")
+
+    @pytest.mark.parametrize("status", [302, 400, 500])
+    async def test_error_text_and_log_carry_no_secrets(
+        self, base_url: str, caplog: pytest.LogCaptureFixture, status: int
+    ) -> None:
+        """A server echoing the credentials back must not get them into either."""
+        from jira_context_mcp.server import get_issue_tree
+
+        caplog.set_level(logging.DEBUG)
+        basic_auth = base64.b64encode(b"test@example.com:dummy-token").decode()
+        with respx.mock(base_url=base_url) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(
+                return_value=httpx.Response(
+                    status,
+                    text=f"dummy-token test@example.com Basic {basic_auth}",
+                    headers={"Location": f"https://elsewhere.test/?token={basic_auth}"},
+                )
+            )
+            out = await get_issue_tree(issue_key="FOO-1")
+        assert out.startswith("Error: Jira request failed — GET /rest/api/3/issue/FOO-1 returned ")
+        for secret in ("dummy-token", "test@example.com", basic_auth):
+            assert secret not in out
+            assert secret not in caplog.text
+
+    async def test_log_of_a_rejected_value_names_the_field_and_not_the_value(
+        self, base_url: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from jira_context_mcp.server import get_issue_tree
+
+        caplog.set_level(logging.DEBUG)
+        payload = _ticket_payload("FOO-1")
+        payload["fields"]["summary"] = {"echo": "dummy-token"}
+        with respx.mock(base_url=base_url) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(
+                return_value=httpx.Response(200, json=payload)
+            )
+            out = await get_issue_tree(issue_key="FOO-1")
+        assert out.endswith("returned 200 OK, but the body is not the expected JSON")
+        assert "summary" in caplog.text
+        assert "dummy-token" not in caplog.text
+
+    async def test_attachment_download_still_follows_redirects(self, base_url: str) -> None:
+        """A redirect is an error on API calls only: Jira commonly 302s a download to a CDN."""
+        from fastmcp.utilities.types import Image
+
+        from jira_context_mcp.server import get_ticket_attachment
+
+        payload = _ticket_payload_with_attachments("FOO-1", [_attachment_payload("1")])
+        cdn = "https://cdn.example.com/blob/1"
+        with respx.mock() as router:
+            router.get(f"{base_url}/rest/api/3/issue/FOO-1").mock(
+                return_value=httpx.Response(200, json=payload)
+            )
+            router.get(f"{base_url}/rest/api/3/attachment/content/1").mock(
+                return_value=httpx.Response(302, headers={"Location": cdn})
+            )
+            router.get(cdn).mock(
+                return_value=httpx.Response(
+                    200, content=b"PNGBYTES", headers={"Content-Type": "image/png"}
+                )
+            )
+            result = await get_ticket_attachment(issue_key="FOO-1", attachment_id="1")
+        assert isinstance(result, Image)
+        assert result.data == b"PNGBYTES"
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            httpx.RemoteProtocolError("illegal header line: Authorization: Basic SECRET"),
+            httpx.ProxyError("502 SECRET"),
+            httpx.LocalProtocolError("Illegal header value SECRET"),
+            httpx.UnsupportedProtocol("SECRET"),
+            httpx.DecodingError("SECRET"),
+        ],
+        ids=lambda error: type(error).__name__,
+    )
+    @pytest.mark.parametrize(
+        ("tool", "kwargs"),
+        [
+            ("get_issue_tree", {}),
+            ("get_ticket_content", {"include_comments": True}),
+            ("get_ticket_attachment", {"attachment_id": "1"}),
+        ],
+    )
+    async def test_transport_failure_comes_back_as_error_text(
+        self, base_url: str, tool: str, kwargs: dict[str, Any], error: Exception
+    ) -> None:
+        from jira_context_mcp import server
+
+        with respx.mock(base_url=base_url, assert_all_called=False) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(side_effect=error)
+            router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
+                return_value=httpx.Response(404, json={})
+            )
+            router.get("/rest/api/3/issue/FOO-1/comment").mock(
+                return_value=httpx.Response(200, json={"comments": []})
+            )
+            out = await getattr(server, tool)(issue_key="FOO-1", **kwargs)
+        assert out.startswith("Error: Jira request failed — GET /rest/api/3/issue/FOO-1 failed")
+        assert out.endswith(type(error).__name__)
+
+    @pytest.mark.parametrize(
+        ("tool", "kwargs", "method", "path"),
+        [
+            pytest.param(
+                "get_ticket_content",
+                {"include_comments": True},
+                "GET",
+                "/rest/api/3/issue/FOO-1/comment",
+                id="comments",
+            ),
+            pytest.param("get_issue_tree", {}, "POST", "/rest/api/3/search/jql", id="children"),
+            pytest.param(
+                "get_smart_checklist", {}, "GET", CHECKLIST_PATH.format(key="FOO-1"), id="checklist"
+            ),
+        ],
+    )
+    async def test_transport_failure_on_the_other_requests_comes_back_as_error_text(
+        self, base_url: str, tool: str, kwargs: dict[str, Any], method: str, path: str
+    ) -> None:
+        from jira_context_mcp import server
+
+        # respx uses the first route that matches, so the failing one goes first.
+        with respx.mock(base_url=base_url, assert_all_called=False) as router:
+            router.route(method=method, path=path).mock(
+                side_effect=httpx.RemoteProtocolError("peer closed connection")
+            )
+            router.get("/rest/api/3/issue/FOO-1").mock(
+                return_value=httpx.Response(200, json=_ticket_payload("FOO-1"))
+            )
+            router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
+                return_value=httpx.Response(404, json={})
+            )
+            out = await getattr(server, tool)(issue_key="FOO-1", **kwargs)
+        assert out == (
+            f"Error: Jira request failed — {method} {path} failed after 4 attempt(s): "
+            "RemoteProtocolError"
+        )
+
+    @pytest.mark.parametrize(
+        ("status", "phrase"),
+        [
+            pytest.param(302, "Found", id="302-no-location"),
+            pytest.param(304, "Not Modified", id="304"),
+        ],
+    )
+    async def test_final_3xx_on_a_download_is_not_an_empty_attachment(
+        self, base_url: str, status: int, phrase: str
+    ) -> None:
+        from jira_context_mcp.server import get_ticket_attachment
+
+        payload = _ticket_payload_with_attachments("FOO-1", [_attachment_payload("1")])
+        with respx.mock(base_url=base_url) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(
+                return_value=httpx.Response(200, json=payload)
+            )
+            router.get("/rest/api/3/attachment/content/1").mock(return_value=httpx.Response(status))
+            out = await get_ticket_attachment(issue_key="FOO-1", attachment_id="1")
+        assert out == (
+            "Error: Jira request failed — "
+            f"GET /rest/api/3/attachment/content/1 returned {status} {phrase}"
+        )
+
+    async def test_download_404_reads_like_any_other_failed_request(self, base_url: str) -> None:
+        from jira_context_mcp.server import get_ticket_attachment
+
+        payload = _ticket_payload_with_attachments("FOO-1", [_attachment_payload("1")])
+        with respx.mock(base_url=base_url) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(
+                return_value=httpx.Response(200, json=payload)
+            )
+            router.get("/rest/api/3/attachment/content/1").mock(return_value=httpx.Response(404))
+            out = await get_ticket_attachment(issue_key="FOO-1", attachment_id="1")
+        assert out == (
+            "Error: Jira request failed — "
+            "GET /rest/api/3/attachment/content/1 returned 404 Not Found"
+        )
+
+    @pytest.mark.parametrize(
+        ("attachment_outcome", "detail"),
+        [
+            pytest.param(
+                {"side_effect": httpx.RemoteProtocolError("illegal status line SECRET")},
+                "RemoteProtocolError",
+                id="protocol-error",
+            ),
+            pytest.param(
+                {"return_value": httpx.Response(303, headers={"Location": "/self"})},
+                "TooManyRedirects",
+                id="redirect-loop",
+            ),
+        ],
+    )
+    async def test_failed_download_comes_back_as_error_text(
+        self, base_url: str, attachment_outcome: dict[str, Any], detail: str
+    ) -> None:
+        from jira_context_mcp.server import get_ticket_attachment
+
+        attachment = _attachment_payload("1")
+        attachment["content"] = f"{base_url}/self"
+        payload = _ticket_payload_with_attachments("FOO-1", [attachment])
+        with respx.mock(base_url=base_url) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(
+                return_value=httpx.Response(200, json=payload)
+            )
+            router.get("/self").mock(**attachment_outcome)
+            out = await get_ticket_attachment(issue_key="FOO-1", attachment_id="1")
+        assert out == f"Error: Jira request failed — attachment download failed: {detail}"
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            pytest.param("FOO-1\n", id="line-break"),
+            pytest.param("FOO-\ud83d", id="lone-surrogate"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("tool", "kwargs"),
+        [
+            ("get_issue_tree", {}),
+            ("get_ticket_content", {"include_comments": True}),
+            ("get_smart_checklist", {}),
+            ("get_ticket_attachment", {"attachment_id": "1"}),
+        ],
+    )
+    async def test_issue_key_httpx_refuses_comes_back_as_error_text_stdio_can_carry(
+        self, tool: str, kwargs: dict[str, Any], key: str
+    ) -> None:
+        """A lone surrogate gets here only from a direct call: stdio rejects it before any tool."""
+        from jira_context_mcp import server
+
+        out = await getattr(server, tool)(issue_key=key, **kwargs)
+        assert out.startswith("Error: Jira request failed — GET '/rest/api/3/issue/FOO-")
+        assert out.endswith("is not a valid request")
+        out.encode("utf-8")
+        assert "\n" not in out
 
 
 # ===================================================================

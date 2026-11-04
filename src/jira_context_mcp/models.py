@@ -22,9 +22,12 @@ Custom statuses are not in this set: see :class:`ChecklistItem`.
 
 
 class _Frozen(BaseModel):
-    """Immutable base for all DTOs in this module."""
+    """Immutable base for all DTOs in this module.
 
-    model_config = ConfigDict(frozen=True)
+    A rejected value stays out of the validation message, which ``_reading_body`` logs.
+    """
+
+    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
 
 
 class ChecklistItem(_Frozen):

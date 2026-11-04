@@ -12,6 +12,7 @@ from jira_context_mcp.models import (
     Checklist,
     ChecklistItem,
     ChecklistSection,
+    ChecklistText,
     Comment,
     Ticket,
     TreeNode,
@@ -60,6 +61,43 @@ def test_checklist_items_property_flattens_sections() -> None:
 def test_checklist_with_no_sections_has_empty_items() -> None:
     cl = Checklist(sections=[])
     assert cl.items == []
+    assert cl.is_empty
+
+
+def test_checklist_item_defaults() -> None:
+    item = ChecklistItem(name="x")
+    assert item.custom_status is None
+    assert item.mandatory is False
+    assert item.details == []
+
+
+def test_section_items_leave_out_text_but_entries_keep_the_order() -> None:
+    item = ChecklistItem(name="x")
+    text = ChecklistText(text="prose")
+    section = ChecklistSection(title=None, entries=[text, item])
+    assert section.items == [item]
+    assert section.entries == [text, item]
+
+
+@pytest.mark.parametrize(
+    ("section", "is_empty"),
+    [
+        (ChecklistSection(title=None, items=[]), True),
+        (ChecklistSection(title="Note", items=[]), False),
+        (ChecklistSection(title=None, entries=[ChecklistText(text="prose")]), False),
+        (ChecklistSection(title=None, items=[ChecklistItem(name="x")]), False),
+    ],
+)
+def test_checklist_is_empty_only_when_there_is_nothing_to_show(
+    section: ChecklistSection, is_empty: bool
+) -> None:
+    assert Checklist(sections=[section]).is_empty is is_empty
+
+
+@pytest.mark.parametrize("level", [0, 7])
+def test_section_level_outside_markdown_range_rejected(level: int) -> None:
+    with pytest.raises(ValidationError):
+        ChecklistSection(title="x", level=level, items=[])
 
 
 def test_comment_with_tz_aware_created_constructs() -> None:

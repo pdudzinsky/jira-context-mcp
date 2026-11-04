@@ -70,8 +70,9 @@ Full content of a single ticket — description, Smart Checklist (when present),
 Pull invoice logic out of BillingService into a new InvoiceService.
 The endpoint contract is in the attached PDF — see [attachment: invoice-api.pdf (id=12348)].
 
-## Smart Checklist (1/3 done)
+## Smart Checklist (1/3 done, 1 in progress)
 ### 1. Service alignment
+
 - [x] Service boundary alignment reviewed
 - [-] Migration plan drafted
 - [ ] Rollout communication to support
@@ -91,19 +92,51 @@ Notes:
 - **Embedded media** inside the description (e.g. a pasted screenshot) renders as `[attachment: filename (id=...)]` when the file is also in the attachment list. The id is the same key the model needs for `get_ticket_attachment`.
 - **`embedded` vs `orphan`** marker per attachment: `embedded` means the file is referenced from inside the description body (someone pasted it into the prose); `orphan` means the file is attached to the ticket but never mentioned. Orphan attachments are typically post-review revisions or supplementary material the author chose not to inline — the LLM treats them as lower-priority context unless something in the prose redirects to them.
 - **Attachment URL** is the last field of each line: Jira's `attachment.content` value, verbatim. A value with userinfo, a query, a fragment or whitespace, or one that isn't `http(s)`, could carry a secret or break the line, so it is left out and the line ends at the marker. It isn't a public link — opening it requires Jira authentication — so the model should read images, PDFs and text files via `get_ticket_attachment`.
-- **Parsing these lines in a client:** match `## Attachments` as a whole line and read fields by position (the marker is always the fifth, the URL the optional sixth). Line breaks in a filename, mime type or author collapse to a space, a free-standing `·` becomes `-`, and description lines imitating a section heading are escaped as `\## …`. The description can still contain lines that look like attachment entries, so check a URL's host against `JIRA_BASE_URL` before sending credentials to it.
+- **Parsing these lines in a client:** match `## Attachments` as a whole line and read fields by position (the marker is always the fifth, the URL the optional sixth). Line breaks in a filename, mime type or author collapse to a space, a free-standing `·` becomes `-`, and description or checklist lines imitating a section heading are escaped as `\## …`. The description or checklist can still contain lines that look like attachment entries, or that a Markdown parser would read as a heading or an open code fence, so match on the raw lines and check a URL's host against `JIRA_BASE_URL` before sending credentials to it.
 
 ### `get_smart_checklist` example
 
 ````markdown
-# Smart Checklist: PROJ-240 (1/3 done)
+# Smart Checklist: PROJ-240 (2/7 done, 1 in progress, 1 skipped, 1 [FAILED])
 
 ## 1. Service alignment
 
 - [x] Service boundary alignment reviewed
 - [-] Migration plan drafted
-- [ ] Rollout communication to support
+- [ ] (mandatory) Rollout communication to support
+  > Needs sign-off from support leads
+
+## 2. Rollout
+
+### 2a. Backend
+
+- [x] Feature flag added
+- [~] Dual-write period
+
+**Translations**
+
+- [ ] [FAILED] German copy reviewed
+- [ ] English copy reviewed
 ````
+
+The output follows the plugin's own markdown, documented in its [Formatting Guide](https://railsware.atlassian.net/wiki/spaces/CHK/pages/90636343/Formatting+Guide+Markdown):
+
+| Plugin's markdown | Meaning | Output |
+|---|---|---|
+| `- text` | To Do | `- [ ] text` |
+| `+ text` | Done | `- [x] text` |
+| `~ text` | In Progress | `- [-] text` |
+| `x text` | Skipped | `- [~] text` |
+| `-! text` (`!` after any marker) | [Mandatory](https://railsware.atlassian.net/wiki/spaces/CHK/pages/3839393793/Mandatory+Items) | `- [ ] (mandatory) text` |
+| `- [FAILED] text` | [Custom status](https://railsware.atlassian.net/wiki/spaces/CHK/pages/3495297056/Checklist+Statuses), or plain text in brackets | `- [ ] [FAILED] text` |
+| `- [priority="High"] text` | [Priority, assignee, due date](https://railsware.atlassian.net/wiki/spaces/CHK/pages/5861736450/Checklist+Priority+Assignee+Due+Date) | `- [ ] [priority="High"] text` |
+| `> text` below an item | Item details | `  > text` below the item |
+| `#` to `######` | Header | Header, with nesting kept down to Markdown's level 6 |
+| Anything else | Text Jira doesn't count as an item | The same line, no checkbox |
+
+The output's `[~]` and `[x]` are this server's markers, so they don't mean what `~` and `x` mean at the start of a plugin line. A bare `[x] text` line is the one exception to the last row: it isn't plugin syntax, but it is still read as an item, with those same markers (`[ ]`, `[x]`, `[-]`, `[~]`), so it counts here even though Jira wouldn't count it. Lines with no content of their own are left out: `---` separators, the `<<~LT-…` / `~>>LT-…` wrappers around [linked template](https://railsware.atlassian.net/wiki/spaces/CHK/pages/4000579601/Linked+Templates) items, and markers with no text.
+
+**Reading the count:** it adds up to the `x/y` of Jira's [Smart Checklist Progress](https://railsware.atlassian.net/wiki/spaces/CHK/pages/1372422219/Custom+Fields+Guide) field, where skipped items count as completed: `40/51 done, 11 skipped` is `51/51` there. A checklist with text but no items reads `0 items, text only`; one with only headers reads `0 items`.
 
 ### `get_ticket_attachment` example
 
@@ -280,7 +313,7 @@ You took a leaf ticket (Subtask / Task) and the description is sparse — ACCs l
 > 3. For each path node above the focus (Story, Epic), call `get_ticket_content` so I see their descriptions and ACCs. The Story usually carries the actual acceptance criteria.
 > 4. Summarize: what's the parent goal, what ACCs apply to my work, and what broader context should I keep in mind?
 
-> **Tip:** if a path node returns `Smart Checklist on KEY: not present`, skip it and check the next ancestor. ACCs sometimes hop a level.
+> **Tip:** if a path node has no `## Smart Checklist` section, check the next ancestor. ACCs sometimes hop a level.
 
 #### Sprint planning — overview of an Epic
 
@@ -341,6 +374,7 @@ All errors come back as the tool response (a string starting with `Error:`) rath
 - `Error: invalid Jira configuration — ...` — env vars are set but malformed (e.g. base URL isn't a valid URL)
 - `Error: Jira authentication failed. ...` — wrong email/token (or whitespace polluting the token)
 - `Error: ticket(s) not found in Jira: PROJ-1234` — typo, deleted, or your token lacks access
+- `Error: Jira request failed — ...` — a network or server error after retries, or a checklist response that holds no property value
 - `Error: Jira rate limit exceeded after retries. ...` — back off and retry
 - `Error: invalid depth parameter. ...` — `depth_up` was `< 1`
 - `Error: hierarchy cycle detected. ...` — parent link loop in Jira (shouldn't happen, but defensive)
@@ -393,7 +427,9 @@ else:
 
 - **Comments:** capped at 100 per ticket. If a ticket has more, a WARN is logged to stderr and the first 100 are returned.
 - **Jira Cloud only.** No Jira Server / Data Center support.
-- **Smart Checklist progress:** v3+ bullet-list checklists display as `(N items)` even when some items are marked done in Jira UI. Legacy `[x]` / `[-]` / `[~]` markers display correctly as `(N/M done)`. Accurate v3+ progress is on the roadmap.
+- **Smart Checklist custom statuses:** the markdown names a custom status but not whether it's configured as checked, and a word in brackets that isn't a status looks the same (`- [FE] Build it`). Items marked `-` with such a name are listed by it in the count and never as done, so Jira's progress figure can be higher when a custom status is configured as checked.
+- **Smart Checklist storage:** the server reads only the plugin's issue property. Railsware notes that its stores can [fall out of sync](https://railsware.atlassian.net/wiki/spaces/CHK/pages/3661922311/Synchronize+Data) after migrations or bulk imports, until an admin runs the plugin's synchronization, so such a ticket can read `not present` or out of date.
+- **Smart Checklist item count:** it comes from the markdown, so on rare tickets it differs from the total Jira stores. On a sample of 1,000 real checklists it matched on 995; four others differ by one or two items, with no rule found behind it, and the fifth has a stored total that is out of date. Every line is still shown either way.
 - **`depth_down` is capped at 3.** Asking for more is silently clamped. The focus ticket and its direct ancestors are always reachable in the tree, even when the focus sits below `depth_down` levels (the spine is always expanded).
 - **ADF coverage:** any node type the walker doesn't handle renders as `[unsupported: <type>]` rather than being silently dropped. Still unhandled: `panel`, `expand`, `nestedExpand`, `status`, `date`, `taskList`, `decisionList`, `layoutSection`, `embedCard`, `blockCard`, `extension` / `bodiedExtension`, `placeholder` — add a handler in `src/jira_context_mcp/adf.py` if you need them. `nestedExpand`, `status` and `date` are the ones worth knowing about, since they turn up inside table cells. Tables render as GFM pipe tables: cell content is flattened onto one line (`<br>` for line breaks, escaped pipes, blank lines dropped) and `colspan` / `rowspan` merges are preserved positionally with empty filler cells. Full list of supported types in CHANGELOG.
 - **Attachment fetch is per-call, not cached.** Every `get_ticket_attachment` call re-fetches the ticket metadata plus the file. For typical "look at one design and move on" flows that's fine; for repeated reads of the same file, expect the latency cost.
@@ -413,7 +449,7 @@ uv run python -m jira_context_mcp  # stdio server — blocks waiting for MCP han
 Run the test suite, linter, and type checker:
 
 ```bash
-uv run pytest                       # 272 tests, ~2s
+uv run pytest                       # ~2s
 uv run ruff check src tests         # lint
 uv run ruff format src tests        # format (auto-applies)
 uv run ruff format --check src tests  # format check (CI-style)

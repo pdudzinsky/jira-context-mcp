@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 
 from jira_context_mcp.markdown import (
+    format_checklist_count,
     render_attachments,
     render_checklist,
-    render_checklist_items,
     render_issue_tree,
     render_ticket_content,
 )
@@ -19,6 +19,8 @@ from jira_context_mcp.models import (
     Checklist,
     ChecklistItem,
     ChecklistSection,
+    ChecklistStatus,
+    ChecklistText,
     Comment,
     Ticket,
     TreeNode,
@@ -86,50 +88,51 @@ def node(
 
 
 # ===================================================================
-# render_checklist_items / render_checklist
+# render_checklist
 # ===================================================================
 
 
-def test_render_checklist_items_uses_canonical_markers() -> None:
-    out = render_checklist_items(
-        [
-            ChecklistItem(name="a", status="open"),
-            ChecklistItem(name="b", status="done"),
-            ChecklistItem(name="c", status="in_progress"),
-            ChecklistItem(name="d", status="skipped"),
-        ]
-    )
+def test_render_checklist_uses_canonical_markers() -> None:
+    items = [
+        ChecklistItem(name="a", status="open"),
+        ChecklistItem(name="b", status="done"),
+        ChecklistItem(name="c", status="in_progress"),
+        ChecklistItem(name="d", status="skipped"),
+    ]
+    out = render_checklist(Checklist(sections=[ChecklistSection(title=None, items=items)]))
     assert out == "- [ ] a\n- [x] b\n- [-] c\n- [~] d"
 
 
 def test_render_checklist_default_heading_level_two(simple_checklist: Checklist) -> None:
-    out = render_checklist(simple_checklist)
-    assert "## 1. First section" in out
-    assert "## 2. Second section" in out
-    assert "- [x] alpha" in out
-    assert "- [-] gamma" in out
+    lines = render_checklist(simple_checklist).splitlines()
+    assert "## 1. First section" in lines
+    assert "## 2. Second section" in lines
+    assert "- [x] alpha" in lines
+    assert "- [-] gamma" in lines
 
 
 def test_render_checklist_heading_level_four(simple_checklist: Checklist) -> None:
-    out = render_checklist(simple_checklist, heading_level=4)
-    assert "#### 1. First section" in out
-    assert "#### 2. Second section" in out
+    lines = render_checklist(simple_checklist, heading_level=4).splitlines()
+    assert "#### 1. First section" in lines
+    assert "#### 2. Second section" in lines
 
 
 def test_render_checklist_clamps_excessive_heading_level(simple_checklist: Checklist) -> None:
-    out = render_checklist(simple_checklist, heading_level=8)
-    assert "###### 1. First section" in out
-    assert "####### " not in out
+    lines = render_checklist(simple_checklist, heading_level=8).splitlines()
+    assert "###### 1. First section" in lines
+    assert "###### 2. Second section" in lines
 
 
+@pytest.mark.parametrize("heading_level", [0, -3])
 def test_render_checklist_clamps_zero_or_negative_heading_level(
-    simple_checklist: Checklist,
+    simple_checklist: Checklist, heading_level: int
 ) -> None:
-    assert "# 1. First section" in render_checklist(simple_checklist, heading_level=0)
-    assert "# 1. First section" in render_checklist(simple_checklist, heading_level=-3)
+    lines = render_checklist(simple_checklist, heading_level=heading_level).splitlines()
+    assert lines[0] == "# 1. First section"
 
 
-def test_render_checklist_skips_empty_sections() -> None:
+def test_render_checklist_keeps_title_only_sections() -> None:
+    """A header can be the whole message: real checklists hold notes written that way."""
     cl = Checklist(
         sections=[
             ChecklistSection(title="Important Note", items=[]),
@@ -137,14 +140,192 @@ def test_render_checklist_skips_empty_sections() -> None:
         ]
     )
     out = render_checklist(cl, heading_level=2)
-    assert "Important Note" not in out
-    assert "## Real" in out
-    assert "- [ ] x" in out
+    assert out == "## Important Note\n\n## Real\n\n- [ ] x"
 
 
 def test_render_checklist_unsectioned_items_omit_header() -> None:
     cl = Checklist(sections=[ChecklistSection(title=None, items=[ChecklistItem(name="x")])])
     assert render_checklist(cl) == "- [ ] x"
+
+
+def _nested_checklist() -> Checklist:
+    return Checklist(
+        sections=[
+            ChecklistSection(
+                title="1. Parent", level=2, items=[ChecklistItem(name="a", status="done")]
+            ),
+            ChecklistSection(title="2. Parent", level=2, items=[]),
+            ChecklistSection(
+                title="2a. Child", level=3, items=[ChecklistItem(name="b", status="done")]
+            ),
+        ]
+    )
+
+
+def test_render_checklist_keeps_the_nesting_of_headers() -> None:
+    assert render_checklist(_nested_checklist(), heading_level=2) == (
+        "## 1. Parent\n\n- [x] a\n\n## 2. Parent\n\n### 2a. Child\n\n- [x] b"
+    )
+
+
+def test_render_checklist_nesting_starts_at_heading_level() -> None:
+    out = render_checklist(_nested_checklist(), heading_level=3)
+    assert "### 1. Parent" in out.splitlines()
+    assert "### 2. Parent" in out.splitlines()
+    assert "#### 2a. Child" in out.splitlines()
+
+
+def test_render_checklist_shifts_a_top_level_header_down_to_heading_level() -> None:
+    cl = Checklist(
+        sections=[
+            ChecklistSection(title="Tab", level=1, items=[]),
+            ChecklistSection(title="Inside", level=2, items=[]),
+        ]
+    )
+    assert render_checklist(cl, heading_level=2) == "## Tab\n\n### Inside"
+
+
+def test_render_checklist_measures_nesting_from_the_shallowest_header_not_the_first() -> None:
+    cl = Checklist(
+        sections=[
+            ChecklistSection(title="Deep first", level=3, items=[]),
+            ChecklistSection(title="Top later", level=1, items=[]),
+        ]
+    )
+    assert render_checklist(cl, heading_level=2) == "#### Deep first\n\n## Top later"
+
+
+def test_render_checklist_clamps_deep_nesting_to_heading_six() -> None:
+    cl = Checklist(
+        sections=[
+            ChecklistSection(title="Top", level=1, items=[]),
+            ChecklistSection(title="Deep", level=6, items=[]),
+        ]
+    )
+    assert render_checklist(cl, heading_level=3).splitlines()[-1] == "###### Deep"
+
+
+def test_render_checklist_ignores_the_level_of_an_untitled_section() -> None:
+    cl = Checklist(
+        sections=[
+            ChecklistSection(title=None, level=1, items=[ChecklistItem(name="a")]),
+            ChecklistSection(title="Title", level=3, items=[]),
+        ]
+    )
+    assert render_checklist(cl, heading_level=2).splitlines()[-1] == "## Title"
+
+
+def test_render_item_shows_mandatory_flag_custom_status_and_details() -> None:
+    item = ChecklistItem(
+        name="item",
+        custom_status="FAILED",
+        mandatory=True,
+        details=["first", "", "> nested"],
+    )
+    out = render_checklist(Checklist(sections=[ChecklistSection(title=None, items=[item])]))
+    assert out == "- [ ] (mandatory) [FAILED] item\n  > first\n  >\n  > > nested"
+
+
+def test_render_checklist_separates_text_from_items_with_blank_lines() -> None:
+    """A text line directly under a list item would be read as part of that item."""
+    cl = Checklist(
+        sections=[
+            ChecklistSection(
+                title=None,
+                entries=[
+                    ChecklistText(text="intro"),
+                    ChecklistItem(name="a"),
+                    ChecklistItem(name="b"),
+                    ChecklistText(text="**Sub heading**"),
+                    ChecklistText(text="  indented"),
+                    ChecklistItem(name="c"),
+                ],
+            )
+        ]
+    )
+    assert render_checklist(cl) == (
+        "intro\n\n- [ ] a\n- [ ] b\n\n**Sub heading**\n  indented\n\n- [ ] c"
+    )
+
+
+# ===================================================================
+# format_checklist_count
+# ===================================================================
+
+
+def _count(*items: ChecklistItem) -> str:
+    return format_checklist_count(
+        Checklist(sections=[ChecklistSection(title=None, items=list(items))])
+    )
+
+
+def test_count_all_done() -> None:
+    assert _count(ChecklistItem(name="a", status="done")) == "1/1 done"
+
+
+def test_count_singular_and_plural_with_none_done() -> None:
+    assert _count(ChecklistItem(name="a")) == "1 item"
+    assert _count(ChecklistItem(name="a"), ChecklistItem(name="b")) == "2 items"
+
+
+def test_count_breaks_down_what_is_not_done() -> None:
+    """The figures add up to Jira's progress field, which counts skipped as completed."""
+    assert (
+        _count(
+            ChecklistItem(name="a", status="done"),
+            ChecklistItem(name="b", status="done"),
+            ChecklistItem(name="c", status="in_progress"),
+            ChecklistItem(name="d", status="skipped"),
+            ChecklistItem(name="e"),
+        )
+        == "2/5 done, 1 in progress, 1 skipped"
+    )
+
+
+def test_count_names_custom_statuses_of_items_not_done_yet() -> None:
+    assert (
+        _count(
+            ChecklistItem(name="a", status="done"),
+            ChecklistItem(name="b", custom_status="FAILED"),
+            ChecklistItem(name="c", custom_status="FAILED"),
+            ChecklistItem(name="d", custom_status="not-needed"),
+        )
+        == "1/4 done, 2 [FAILED], 1 [not-needed]"
+    )
+
+
+def test_count_keeps_a_custom_status_apart_from_the_default_one_of_that_name() -> None:
+    assert (
+        _count(
+            ChecklistItem(name="a", status="skipped"),
+            ChecklistItem(name="b", custom_status="skipped"),
+        )
+        == "2 items, 1 skipped, 1 [skipped]"
+    )
+
+
+def test_count_does_not_list_a_done_item_twice() -> None:
+    assert _count(ChecklistItem(name="a", status="done", custom_status="PASSED")) == "1/1 done"
+
+
+@pytest.mark.parametrize(
+    ("status", "label"),
+    [("in_progress", "1 item, 1 in progress"), ("skipped", "1 item, 1 skipped")],
+)
+def test_count_names_custom_statuses_of_to_do_items_only(
+    status: ChecklistStatus, label: str
+) -> None:
+    assert _count(ChecklistItem(name="a", status=status, custom_status="X")) == label
+
+
+def test_count_says_when_there_is_only_text() -> None:
+    cl = Checklist(sections=[ChecklistSection(title=None, entries=[ChecklistText(text="prose")])])
+    assert format_checklist_count(cl) == "0 items, text only"
+
+
+def test_count_of_a_checklist_with_only_headers() -> None:
+    cl = Checklist(sections=[ChecklistSection(title="Note", items=[])])
+    assert format_checklist_count(cl) == "0 items"
 
 
 # ===================================================================
@@ -311,12 +492,49 @@ def test_render_ticket_content_count_uses_total_when_none_done() -> None:
     assert "## Smart Checklist (2 items)" in out
 
 
-def test_render_ticket_content_omits_checklist_when_no_items() -> None:
+def test_render_ticket_content_omits_checklist_when_empty() -> None:
     t = make_ticket("FOO-1")
     out = render_ticket_content(
         t, checklist=Checklist(sections=[]), comments=[], include_comments=False
     )
     assert "Smart Checklist" not in out
+
+
+def test_render_ticket_content_shows_a_checklist_with_only_text() -> None:
+    t = make_ticket("FOO-1")
+    cl = Checklist(sections=[ChecklistSection(title=None, entries=[ChecklistText(text="prose")])])
+    out = render_ticket_content(t, checklist=cl, comments=[], include_comments=False)
+    assert "## Smart Checklist (0 items, text only)\nprose" in out
+
+
+def test_render_ticket_content_shows_a_checklist_with_only_headers() -> None:
+    t = make_ticket("FOO-1")
+    cl = Checklist(sections=[ChecklistSection(title="A note", level=2, items=[])])
+    out = render_ticket_content(t, checklist=cl, comments=[], include_comments=False)
+    assert "## Smart Checklist (0 items)\n### A note" in out
+
+
+def test_render_ticket_content_nests_checklist_headers_below_its_section() -> None:
+    t = make_ticket("FOO-1")
+    cl = Checklist(
+        sections=[
+            ChecklistSection(title="Parent", level=2, items=[]),
+            ChecklistSection(title="Child", level=3, items=[ChecklistItem(name="x")]),
+        ]
+    )
+    lines = render_ticket_content(t, checklist=cl, comments=[], include_comments=False).splitlines()
+    assert "### Parent" in lines
+    assert "#### Child" in lines
+
+
+@pytest.mark.parametrize("line", ["  ## Attachments", "\t## Comments", "   ## description"])
+def test_checklist_text_cannot_pass_for_a_section_of_the_ticket(line: str) -> None:
+    """Whoever can edit a checklist must not be able to forge a section either."""
+    t = make_ticket("FOO-1")
+    cl = Checklist(sections=[ChecklistSection(title=None, entries=[ChecklistText(text=line)])])
+    out = render_ticket_content(t, checklist=cl, comments=[], include_comments=False)
+    assert line not in out.splitlines()
+    assert line.replace("##", r"\##") in out.splitlines()
 
 
 def test_render_ticket_content_omits_checklist_when_none() -> None:
@@ -560,6 +778,27 @@ def test_render_ticket_content_escapes_heading_after_any_line_boundary() -> None
     t = make_ticket("FOO-1", description_md="intro\u2028## Attachments")
     out = render_ticket_content(t, checklist=None, comments=[], include_comments=False)
     assert r"\## Attachments" in out.splitlines()
+
+
+@pytest.mark.parametrize(
+    "heading",
+    [
+        "\u00a0## Attachments",
+        "\u2003## Attachments",
+        "\u3000## Attachments",
+        "\x1f## Attachments",
+        "\ufeff## Attachments",
+        "##\u00a0Attachments",
+        "## Smart\u00a0Checklist (1 item)",
+    ],
+)
+def test_escaping_covers_the_whitespace_a_lenient_client_would_strip(heading: str) -> None:
+    """``str.strip`` and JavaScript's ``trim`` also remove these characters."""
+    t = make_ticket("FOO-1", description_md=heading)
+    cl = Checklist(sections=[ChecklistSection(title=None, entries=[ChecklistText(text=heading)])])
+    out = render_ticket_content(t, checklist=cl, comments=[], include_comments=False)
+    assert heading not in out.splitlines()
+    assert out.splitlines().count(heading.replace("##", r"\##")) == 2
 
 
 def test_render_ticket_content_keeps_other_headings_in_description() -> None:

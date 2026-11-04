@@ -11,11 +11,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 ChecklistStatus = Literal["open", "done", "in_progress", "skipped"]
-"""Canonical Smart Checklist item states. The parser in ``jira`` maps any
-upstream value outside this set to ``"open"`` before constructing the model."""
+"""Smart Checklist's default statuses: To Do, Done, In Progress and Skipped.
+
+The plugin writes them inline, as the line markers ``-``, ``+``, ``~`` and ``x``.
+Custom statuses are not in this set: see :class:`ChecklistItem`.
+"""
 
 
 class _Frozen(BaseModel):
@@ -25,22 +28,62 @@ class _Frozen(BaseModel):
 
 
 class ChecklistItem(_Frozen):
-    """A single Smart Checklist entry."""
+    """A checklist line that carries a status.
+
+    ``name`` is the text after the marker as written, so inline markdown and
+    the ``[priority="…"]`` / ``[dueDate="…"]`` / ``[assignee="…"]`` attributes
+    stay in it.
+
+    ``status`` reflects the line marker alone. ``custom_status`` is the
+    ``[name]`` right after it (``- [FAILED] text``). Jira resolves that name
+    against the statuses configured on the instance, which the markdown does
+    not show, so it can't say whether the status counts as checked, or whether
+    the brackets are a status at all rather than plain text (``- [FE] text``).
+
+    ``details`` are the ``>`` lines below the item, minus that first ``>``.
+    """
 
     name: str
     status: ChecklistStatus = "open"
+    custom_status: str | None = None
+    mandatory: bool = False
+    details: list[str] = Field(default_factory=list)
+
+
+class ChecklistText(_Frozen):
+    """A checklist line that is not an item, kept verbatim where it was found.
+
+    Jira doesn't count these lines as items, so they have no status. They hold
+    real content, such as sub-headings written in bold or notes between items.
+    """
+
+    text: str
 
 
 class ChecklistSection(_Frozen):
-    """A group of items under a single Smart Checklist header.
+    """What sits under one Smart Checklist header, in document order.
 
-    ``title`` is the markdown header text minus the leading ``#`` characters,
-    or ``None`` for items appearing before the first header (rare — modern
-    Smart Checklist always starts with a section header).
+    ``title`` is the header text minus the leading ``#`` characters. It is
+    ``None`` for content before the first header, which is common because a
+    checklist doesn't need headers at all, and for a header with no text.
+    ``level`` is the number of those characters.
+    Nesting is expressed by level alone: a parent header with only a nested
+    header below it is a section with no entries of its own.
+
+    ``entries`` also accepts ``items=`` so that a section holding nothing but
+    items reads naturally at the call site.
     """
 
     title: str | None
-    items: list[ChecklistItem]
+    level: int = Field(default=1, ge=1, le=6)
+    entries: list[ChecklistItem | ChecklistText] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("entries", "items"),
+    )
+
+    @property
+    def items(self) -> list[ChecklistItem]:
+        return [entry for entry in self.entries if isinstance(entry, ChecklistItem)]
 
 
 class Checklist(_Frozen):
@@ -49,7 +92,7 @@ class Checklist(_Frozen):
     Stored as an ordered list of sections preserving the grouping that
     Smart Checklist exposes in the Jira UI. The flat ``items`` accessor is
     kept as a property for callers that need the full list without caring
-    about sections (e.g. counting, the simple "no items" check).
+    about sections (e.g. counting).
     """
 
     sections: list[ChecklistSection]
@@ -57,6 +100,11 @@ class Checklist(_Frozen):
     @property
     def items(self) -> list[ChecklistItem]:
         return [item for section in self.sections for item in section.items]
+
+    @property
+    def is_empty(self) -> bool:
+        """``True`` when there is nothing to show: no items, text or titled header."""
+        return not any(section.title or section.entries for section in self.sections)
 
 
 class Comment(_Frozen):

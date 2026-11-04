@@ -4,14 +4,19 @@ Minimal walker that handles the node types commonly used in Jira issue
 descriptions and comments: ``paragraph``, ``heading``, ``bulletList``,
 ``orderedList``, ``listItem``, ``codeBlock``, ``blockquote``, ``rule``,
 ``table`` / ``tableRow`` / ``tableHeader`` / ``tableCell``,
+``expand`` / ``nestedExpand``, ``layoutSection`` / ``layoutColumn``,
 ``text`` (with ``strong``, ``em``, ``code``, ``strike``, ``link`` marks),
 ``hardBreak``, ``mention``, ``emoji``, ``inlineCard``, and ``mediaSingle`` /
-``mediaGroup`` / ``media`` / ``mediaInline``.
+``mediaGroup`` / ``media`` / ``mediaInline`` / ``caption``.
 
 Tables render as GitHub-flavored pipe tables; cell content is flattened
 onto one line (``<br>`` for line breaks, literal pipes escaped). Header
 detection and ``colspan`` / ``rowspan`` handling are documented on
 :func:`_render_table`.
+
+Sections Jira shows folded render as a blockquote that opens with a
+``**Collapsed section in Jira: <title>**`` label, so a reader can tell them
+from the ticket's main text. See :func:`_render_collapsed`.
 
 Media nodes are resolved against the surrounding ticket's attachment list
 so the LLM sees the filename of every embedded image and the id it needs
@@ -28,8 +33,10 @@ When neither resolves (orphan media, or an attachment that was deleted
 after the body was edited), the marker degrades to plain ``[image]``.
 
 Unknown block or inline nodes are preserved as ``[unsupported: <type>]``
-markers so that missing content is visible rather than silently dropped;
-unknown marks are silently ignored (the underlying text is still rendered).
+markers so that what the walker can't represent is visible rather than
+silently dropped. An unknown block keeps its children, quoted under the
+marker (see :func:`_render_unknown_block`); unknown marks are silently
+ignored (the underlying text is still rendered).
 
 Callers can pass ``heading_offset`` to shift every ``heading`` level by a
 fixed amount — the ticket-context renderer uses this to nest ADF headings
@@ -45,7 +52,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from itertools import groupby
 from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
@@ -66,6 +74,27 @@ _FILENAME_UUID_SUFFIX_RE: Final = re.compile(
     re.IGNORECASE,
 )
 
+_COLLAPSED_LABEL: Final = "Collapsed section in Jira"
+
+# ADF's inline types: the ones ``_render_inline`` renders, plus the ones it marks as
+# unsupported. Tells an unknown node's inline children from its blocks. A tuple, like
+# the walker's other type checks, because a malformed ``type`` may not be hashable.
+_INLINE_TYPES: Final = (
+    "text",
+    "hardBreak",
+    "mention",
+    "emoji",
+    "inlineCard",
+    "mediaInline",
+    "status",
+    "date",
+    "placeholder",
+    "inlineExtension",
+)
+
+# Items of a list the walker has no handler for: its one marker speaks for them.
+_UNKNOWN_LIST_ITEMS: Final = ("taskItem", "decisionItem")
+
 
 @dataclass(frozen=True)
 class _RenderContext:
@@ -81,6 +110,8 @@ class _RenderContext:
     heading_offset: int = 0
     attachments_by_filename: dict[str, str] = field(default_factory=dict)
     attachments_by_id: dict[str, str] = field(default_factory=dict)
+    # Set inside a table cell, which holds one line; see :func:`_quote`.
+    in_table_cell: bool = False
 
 
 def adf_to_markdown(
@@ -146,7 +177,7 @@ def _render_blocks(nodes: list[_AdfNode], ctx: _RenderContext) -> list[str]:
         if not isinstance(node, dict):
             continue
         text = _render_block(node, ctx)
-        if text:
+        if text.strip():
             rendered.append(text)
     return rendered
 
@@ -178,14 +209,14 @@ def _render_block(node: _AdfNode, ctx: _RenderContext) -> str:
         )
         return f"```{lang}\n{text}\n```"
     if node_type == "blockquote":
-        inner = _render_blocks(content, ctx)
-        if not inner:
-            return ""
-        body = "\n\n".join(inner)
-        return "\n".join(f"> {line}" if line else ">" for line in body.splitlines())
-    if node_type == "listItem":
+        return _quote(_render_blocks(content, ctx), ctx)
+    if node_type in ("expand", "nestedExpand"):
+        return _render_collapsed(node, ctx)
+    if node_type in ("listItem", "layoutSection", "layoutColumn"):
         # listItem is normally rendered by _render_list; reaching it here means
         # it appeared at the top level, which we render as its block children.
+        # A layout only arranges columns on the page, with no meaning of its own,
+        # same policy as the presentation attrs ignored in _render_table.
         return "\n\n".join(_render_blocks(content, ctx))
     if node_type == "rule":
         return "---"
@@ -194,16 +225,89 @@ def _render_block(node: _AdfNode, ctx: _RenderContext) -> str:
     if node_type in ("mediaSingle", "mediaGroup"):
         # Wrappers — descend into inner media node(s) so we can resolve attrs.id
         # against the attachment list. mediaGroup may carry multiple files;
-        # render each as its own placeholder line.
+        # render each as its own placeholder line. A caption's text follows them.
         parts = [
             _format_media(child, ctx)
             for child in content
             if isinstance(child, dict) and child.get("type") in ("media", "mediaInline")
         ]
-        return "\n".join(parts) if parts else "[image]"
+        captions = [
+            _render_inline(child.get("content") or [], ctx)
+            for child in content
+            if isinstance(child, dict) and child.get("type") == "caption"
+        ]
+        return "\n".join(filter(None, [*(parts or ["[image]"]), *captions]))
     if node_type in ("media", "mediaInline"):
         return _format_media(node, ctx)
-    return f"[unsupported: {node_type}]"
+    return _render_unknown_block(node, ctx)
+
+
+def _quote(blocks: list[str], ctx: _RenderContext) -> str:
+    """Render ``blocks`` as one blockquote, with the prefix on every line.
+
+    A table cell flattens onto one line and drops blank lines, so a quote inside one
+    leaves its blank lines out, rather than writing them as bare ``>`` lines that the
+    cell couldn't tell from text.
+    """
+    lines = "\n\n".join(blocks).splitlines()
+    if ctx.in_table_cell:
+        lines = [line for line in lines if line.strip()]
+    return "\n".join(f"> {line}" if line else ">" for line in lines)
+
+
+def _render_collapsed(node: _AdfNode, ctx: _RenderContext) -> str:
+    """Render ``expand`` / ``nestedExpand``, a section Jira shows folded under a title.
+
+    A section can hold live content, such as expected behaviour, or a superseded
+    version of the ticket's text, so it is kept, and a reader has to be able to tell
+    it from the main text. The label says what it is and leaves judging it to the
+    reader, by its title. The quote marks where it ends: every line carries the
+    prefix, so nothing inside can pass for main text. The title is flattened so the
+    label stays on one line, which also drops the trailing space that would break
+    the bold. An empty section with no title says nothing and vanishes upstream in
+    :func:`_render_blocks`, like an empty blockquote.
+    """
+    raw_title = (node.get("attrs") or {}).get("title")
+    title = " ".join(raw_title.split()) if isinstance(raw_title, str) else ""
+    blocks = _render_blocks(node.get("content") or [], ctx)
+    if not title and not blocks:
+        return ""
+    label = f"{_COLLAPSED_LABEL}: {title}" if title else _COLLAPSED_LABEL
+    return _quote([f"**{label}**", *blocks], ctx)
+
+
+def _render_unknown_block(node: _AdfNode, ctx: _RenderContext) -> str:
+    """Render a block node the walker has no handler for, keeping what it holds.
+
+    The marker says the node's own meaning is lost, like a ``panel``'s type or a task's
+    state, and the quote says which text belonged to it. Items of a list render as just
+    their content, under the list's one marker, as a ``taskList`` would otherwise stack
+    a marker and a quote level on every item. Anything else keeps its own marker at any
+    depth, so a reader can always see what the text was. With nothing to show, the bare
+    marker remains.
+    """
+    node_type = node.get("type")
+    blocks = _render_children(node.get("content") or [], ctx)
+    if node_type in _UNKNOWN_LIST_ITEMS:
+        return "\n\n".join(blocks)
+    marker = f"[unsupported: {node_type}]"
+    return _quote([marker, *blocks], ctx) if blocks else marker
+
+
+def _render_children(nodes: list[_AdfNode], ctx: _RenderContext) -> list[str]:
+    """Render the children of a node with an unknown schema, blocks or inline alike.
+
+    A run of inline nodes forms one block: ``_render_block`` doesn't know ``text``, and
+    rendering the nodes apart would split a sentence at every change of marks.
+    """
+    children = [n for n in nodes if isinstance(n, dict)]
+    blocks: list[str] = []
+    for inline, run in groupby(children, key=lambda n: n.get("type") in _INLINE_TYPES):
+        if not inline:
+            blocks.extend(_render_blocks(list(run), ctx))
+        elif (rendered := _render_inline(list(run), ctx)).strip():
+            blocks.append(rendered)
+    return blocks
 
 
 def _render_list(items: list[_AdfNode], *, bullet: bool, ctx: _RenderContext) -> str:
@@ -212,6 +316,10 @@ def _render_list(items: list[_AdfNode], *, bullet: bool, ctx: _RenderContext) ->
     ``attrs.order`` on ``orderedList`` is intentionally ignored: markdown
     renderers renumber regardless, and lists beginning at a non-1 start are
     rare enough that the complexity is not worth it in v0.1.
+
+    Continuation lines are indented by the width of the item's prefix. Markdown
+    keeps a line in the item only from that column on, so anything shallower would
+    close the list under a ``1. `` and restart its numbering.
     """
     lines: list[str] = []
     for index, item in enumerate(items, start=1):
@@ -226,8 +334,9 @@ def _render_list(items: list[_AdfNode], *, bullet: bool, ctx: _RenderContext) ->
         body = "\n\n".join(rendered_blocks)
         first, *rest = body.splitlines()
         lines.append(f"{prefix}{first}")
+        indent = " " * len(prefix)
         for line in rest:
-            lines.append(f"  {line}" if line else "")
+            lines.append(f"{indent}{line}" if line else "")
     return "\n".join(lines)
 
 
@@ -368,15 +477,14 @@ def _render_table_cell(cell: _AdfNode, ctx: _RenderContext) -> str:
     code blocks and nested lists stay readable. Whitespace-only lines are
     dropped rather than emitted as a second ``<br>`` — once a cell is a
     single physical line a run of breaks carries no information, so a blank
-    line inside a flattened code block does not survive. Pipes are escaped
-    last, on the whole flattened string, so the row structure survives any
-    cell content.
+    line inside a flattened code block does not survive. A quote leaves out
+    its blank lines itself, as they would no longer be blank (see
+    :func:`_quote`). Pipes are escaped last, on the whole flattened string,
+    so the row structure survives any cell content.
     """
+    blocks = _render_blocks(cell.get("content") or [], replace(ctx, in_table_cell=True))
     lines = [
-        stripped
-        for block in _render_blocks(cell.get("content") or [], ctx)
-        for line in block.splitlines()
-        if (stripped := line.rstrip())
+        stripped for block in blocks for line in block.splitlines() if (stripped := line.rstrip())
     ]
     return "<br>".join(lines).replace("|", "\\|")
 

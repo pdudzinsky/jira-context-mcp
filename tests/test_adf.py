@@ -908,11 +908,420 @@ def test_oversized_rowspan_clamps_to_row_count_and_keeps_column() -> None:
     assert lines[-1] == "|  | R25 |"
 
 
+# ---------- collapsed sections ----------
+
+
+def expand(
+    *content: dict[str, Any],
+    title: Any = "Details",
+    node_type: str = "expand",
+) -> dict[str, Any]:
+    return {"type": node_type, "attrs": {"title": title}, "content": list(content)}
+
+
+def test_expand_is_labelled_as_collapsed_and_quoted() -> None:
+    d = doc(expand(para(text("hidden")), title="Previous description"))
+    assert adf_to_markdown(d) == (
+        "> **Collapsed section in Jira: Previous description**\n>\n> hidden"
+    )
+
+
+def test_text_around_expand_stays_outside_the_quote() -> None:
+    d = doc(para(text("before")), expand(para(text("inside"))), para(text("after")))
+    assert adf_to_markdown(d) == (
+        "before\n\n> **Collapsed section in Jira: Details**\n>\n> inside\n\nafter"
+    )
+
+
+@pytest.mark.parametrize("title", [None, "", "   ", 7])
+def test_expand_without_usable_title_still_says_what_it_is(title: Any) -> None:
+    out = adf_to_markdown(doc(expand(para(text("hidden")), title=title)))
+    assert out == "> **Collapsed section in Jira**\n>\n> hidden"
+
+
+def test_expand_without_attrs_still_says_what_it_is() -> None:
+    out = adf_to_markdown(doc({"type": "expand", "content": [para(text("hidden"))]}))
+    assert out == "> **Collapsed section in Jira**\n>\n> hidden"
+
+
+@pytest.mark.parametrize(
+    ("title", "shown"),
+    [
+        pytest.param("Process & Design ", "Process & Design", id="trailing-space-breaks-bold"),
+        pytest.param("first\nsecond", "first second", id="line-feed"),
+        pytest.param("first\N{LINE SEPARATOR}second", "first second", id="unicode-line-separator"),
+        pytest.param("x\n## Attachments", "x ## Attachments", id="forged-section"),
+    ],
+)
+def test_expand_title_stays_on_the_label_line(title: str, shown: str) -> None:
+    out = adf_to_markdown(doc(expand(para(text("body")), title=title)))
+    assert out == f"> **Collapsed section in Jira: {shown}**\n>\n> body"
+
+
+def test_expand_with_title_and_no_content_keeps_the_title() -> None:
+    assert adf_to_markdown(doc(expand(title="Only"))) == "> **Collapsed section in Jira: Only**"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param([], id="no-children"),
+        pytest.param([para()], id="empty-paragraph"),
+        pytest.param([para(text("  "))], id="spaces"),
+        pytest.param([para(text("\N{NO-BREAK SPACE}"))], id="no-break-space"),
+        pytest.param([para({"type": "hardBreak"})], id="hard-break"),
+    ],
+)
+def test_expand_with_no_title_and_no_content_vanishes(content: list[dict[str, Any]]) -> None:
+    assert adf_to_markdown(doc(expand(*content, title=None))) is None
+
+
+def test_expand_with_title_and_blank_content_has_no_dangling_quote_line() -> None:
+    out = adf_to_markdown(doc(expand(para(text("  ")), title="Only")))
+    assert out == "> **Collapsed section in Jira: Only**"
+
+
+def test_blockquote_with_only_whitespace_vanishes() -> None:
+    assert adf_to_markdown(doc({"type": "blockquote", "content": [para(text("  "))]})) is None
+
+
+def test_expand_body_is_prefixed_at_every_line_boundary() -> None:
+    d = doc(expand(para(text("x\N{LINE SEPARATOR}## Attachments"))))
+    assert adf_to_markdown(d) == (
+        "> **Collapsed section in Jira: Details**\n>\n> x\n> ## Attachments"
+    )
+
+
+def test_expand_body_goes_through_the_normal_walker() -> None:
+    d = doc(
+        expand(
+            heading(4, text("Scope")),
+            bullet_list(list_item(para(text("a")))),
+            {"type": "codeBlock", "attrs": {"language": "sql"}, "content": [text("select 1")]},
+        )
+    )
+    assert adf_to_markdown(d, heading_offset=1) == (
+        "> **Collapsed section in Jira: Details**\n>\n"
+        "> ##### Scope\n>\n> - a\n>\n> ```sql\n> select 1\n> ```"
+    )
+
+
+def test_expand_resolves_embedded_media() -> None:
+    media_block = {
+        "type": "mediaSingle",
+        "content": [{"type": "media", "attrs": {"id": "ms", "alt": "mockup.png"}}],
+    }
+    out = adf_to_markdown(doc(expand(media_block)), attachments=[_att("44416", "mockup.png")])
+    assert out == (
+        "> **Collapsed section in Jira: Details**\n>\n> [attachment: mockup.png (id=44416)]"
+    )
+
+
+def test_expand_inside_expand_nests_the_quote() -> None:
+    inner = expand(para(text("inner")), title="Inner", node_type="nestedExpand")
+    d = doc(expand(para(text("outer")), inner, title="Outer"))
+    assert adf_to_markdown(d) == (
+        "> **Collapsed section in Jira: Outer**\n>\n> outer\n>\n"
+        "> > **Collapsed section in Jira: Inner**\n> >\n> > inner"
+    )
+
+
+def test_nested_expand_in_table_cell_stays_on_one_line() -> None:
+    nested = expand(para(text("a")), para(text("b")), title="T", node_type="nestedExpand")
+    d = doc(table(table_row(table_cell(nested))))
+    assert adf_to_markdown(d) == (
+        "|  |\n| --- |\n| > **Collapsed section in Jira: T**<br>> a<br>> b |"
+    )
+
+
+def test_nested_expand_in_table_cell_is_prefixed_at_every_line_boundary() -> None:
+    body = para(text("x\N{LINE SEPARATOR}y"))
+    d = doc(table(table_row(table_cell(expand(body, title="T", node_type="nestedExpand")))))
+    assert adf_to_markdown(d) == (
+        "|  |\n| --- |\n| > **Collapsed section in Jira: T**<br>> x<br>> y |"
+    )
+
+
+# ---------- quotes in table cells ----------
+
+
+def quote(*content: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "blockquote", "content": list(content)}
+
+
+def test_blockquote_in_table_cell_has_no_bare_separator_lines() -> None:
+    d = doc(table(table_row(table_cell(quote(para(text("a")), para(text("b")))))))
+    assert adf_to_markdown(d) == "|  |\n| --- |\n| > a<br>> b |"
+
+
+def test_nested_blockquote_in_table_cell_has_no_bare_separator_lines() -> None:
+    d = doc(table(table_row(table_cell(quote(quote(para(text("a")), para(text("b"))))))))
+    assert adf_to_markdown(d) == "|  |\n| --- |\n| > > a<br>> > b |"
+
+
+def test_blockquote_in_list_in_table_cell_has_no_bare_separator_lines() -> None:
+    item = list_item(quote(para(text("a")), para(text("b"))))
+    d = doc(table(table_row(table_cell(bullet_list(item)))))
+    assert adf_to_markdown(d) == "|  |\n| --- |\n| - > a<br>  > b |"
+
+
+def test_blank_code_line_in_quote_in_table_cell_is_dropped_without_a_trace() -> None:
+    code = {"type": "codeBlock", "content": [text("a\n\nb")]}
+    d = doc(table(table_row(table_cell(quote(code)))))
+    assert adf_to_markdown(d) == "|  |\n| --- |\n| > ```<br>> a<br>> b<br>> ``` |"
+
+
+@pytest.mark.parametrize("cell_text", [">", ">>", "> >", ">>>"])
+def test_table_cell_keeps_text_made_of_quote_characters(cell_text: str) -> None:
+    row = table_row(table_cell(para(text(cell_text))), table_cell(para(text("meaning"))))
+    assert adf_to_markdown(doc(table(row))) == (
+        f"|  |  |\n| --- | --- |\n| {cell_text} | meaning |"
+    )
+
+
+def test_table_header_cell_keeps_text_made_of_quote_characters() -> None:
+    d = doc(table(table_row(table_header(para(text(">"))), table_header(para(text("<"))))))
+    assert adf_to_markdown(d) == "| > | < |\n| --- | --- |"
+
+
+def test_table_cell_keeps_a_line_made_of_a_quote_character() -> None:
+    line = para(text("a"), {"type": "hardBreak"}, text(">"), {"type": "hardBreak"}, text("b"))
+    d = doc(table(table_row(table_cell(line))))
+    assert adf_to_markdown(d) == "|  |\n| --- |\n| a<br>><br>b |"
+
+
+def test_table_cell_keeps_a_code_line_made_of_a_quote_character() -> None:
+    code = {"type": "codeBlock", "content": [text("a\n>\nb")]}
+    d = doc(table(table_row(table_cell(code))))
+    assert adf_to_markdown(d) == "|  |\n| --- |\n| ```<br>a<br>><br>b<br>``` |"
+
+
+# ---------- media captions ----------
+
+
+def _captioned_media(*caption: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "mediaSingle",
+        "content": [
+            {"type": "media", "attrs": {"id": "ms", "alt": "mockup.png"}},
+            {"type": "caption", "content": list(caption)},
+        ],
+    }
+
+
+def test_media_single_keeps_its_caption_after_the_image() -> None:
+    node = _captioned_media(text("Figure 1: "), text("the flow", marks=[{"type": "strong"}]))
+    out = adf_to_markdown(doc(node), attachments=[_att("44416", "mockup.png")])
+    assert out == "[attachment: mockup.png (id=44416)]\nFigure 1: **the flow**"
+
+
+def test_media_single_with_empty_caption_is_just_the_image() -> None:
+    assert adf_to_markdown(doc(_captioned_media())) == "[image]"
+
+
+def test_media_single_with_only_a_caption_still_marks_the_image() -> None:
+    node = {"type": "mediaSingle", "content": [{"type": "caption", "content": [text("Figure 1")]}]}
+    assert adf_to_markdown(doc(node)) == "[image]\nFigure 1"
+
+
+def test_caption_in_expand_stays_inside_the_quote() -> None:
+    out = adf_to_markdown(doc(expand(_captioned_media(text("Figure 1")))))
+    assert out == "> **Collapsed section in Jira: Details**\n>\n> [image]\n> Figure 1"
+
+
+# ---------- ordered list continuation ----------
+
+
+def test_nested_list_in_ordered_item_aligns_with_the_item_text() -> None:
+    item = list_item(para(text("a")), bullet_list(list_item(para(text("b")))))
+    assert adf_to_markdown(doc(ordered_list(item))) == "1. a\n\n   - b"
+
+
+def test_ordered_continuation_follows_the_width_of_the_prefix() -> None:
+    items = [list_item(para(text(str(i)))) for i in range(1, 10)]
+    items.append(list_item(para(text("tenth")), bullet_list(list_item(para(text("nested"))))))
+    out = adf_to_markdown(doc(ordered_list(*items)))
+    assert out is not None
+    assert out.endswith("\n10. tenth\n\n    - nested")
+
+
+def test_quote_in_ordered_item_stays_inside_the_item() -> None:
+    d = doc(ordered_list(list_item(expand(para(text("body")))), list_item(para(text("next")))))
+    assert adf_to_markdown(d) == (
+        "1. > **Collapsed section in Jira: Details**\n   >\n   > body\n2. next"
+    )
+
+
+# ---------- layouts ----------
+
+
+def _column(*content: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "layoutColumn", "attrs": {"width": 50}, "content": list(content)}
+
+
+def test_layout_renders_its_columns_as_plain_blocks() -> None:
+    section = {
+        "type": "layoutSection",
+        "content": [_column(para(text("left"))), _column(para(text("right")))],
+    }
+    assert adf_to_markdown(doc(section)) == "left\n\nright"
+
+
+def test_empty_layout_vanishes() -> None:
+    assert adf_to_markdown(doc({"type": "layoutSection", "content": [_column(para())]})) is None
+
+
+def test_unknown_blocks_in_a_layout_keep_their_markers() -> None:
+    task_list = {
+        "type": "taskList",
+        "content": [{"type": "taskItem", "attrs": {"state": "DONE"}, "content": [text("one")]}],
+    }
+    panel = {"type": "panel", "content": [para(text("danger"))]}
+    d = doc({"type": "layoutSection", "content": [_column(task_list, panel)]})
+    assert adf_to_markdown(d) == (
+        "> [unsupported: taskList]\n>\n> one\n\n> [unsupported: panel]\n>\n> danger"
+    )
+
+
 # ---------- graceful fallback ----------
 
 
 def test_unknown_block_type_renders_placeholder() -> None:
     assert adf_to_markdown(doc({"type": "panel", "content": []})) == "[unsupported: panel]"
+
+
+def test_unknown_block_keeps_its_children_under_the_marker() -> None:
+    node = {"type": "panel", "attrs": {"panelType": "warning"}, "content": [para(text("careful"))]}
+    assert adf_to_markdown(doc(node)) == "> [unsupported: panel]\n>\n> careful"
+
+
+def test_unknown_block_with_inline_children_keeps_one_line() -> None:
+    node = {"type": "weirdBlock", "content": [text("a "), text("b", marks=[{"type": "strong"}])]}
+    assert adf_to_markdown(doc(node)) == "> [unsupported: weirdBlock]\n>\n> a **b**"
+
+
+def test_unknown_block_with_mixed_children_keeps_their_order() -> None:
+    node = {"type": "weirdBlock", "content": [text("a"), para(text("b")), text("c")]}
+    assert adf_to_markdown(doc(node)) == "> [unsupported: weirdBlock]\n>\n> a\n>\n> b\n>\n> c"
+
+
+@pytest.mark.parametrize(
+    ("list_type", "item_type"),
+    [("taskList", "taskItem"), ("decisionList", "decisionItem")],
+)
+def test_unknown_list_has_one_marker_for_all_its_items(list_type: str, item_type: str) -> None:
+    def item(s: str) -> dict[str, Any]:
+        return {"type": item_type, "attrs": {"state": "TODO"}, "content": [text(s)]}
+
+    d = doc({"type": list_type, "content": [item("one"), item("two")]})
+    assert adf_to_markdown(d) == f"> [unsupported: {list_type}]\n>\n> one\n>\n> two"
+
+
+def test_empty_item_of_an_unknown_list_leaves_no_trace() -> None:
+    items = [{"type": "taskItem", "content": [text("one")]}, {"type": "taskItem", "content": []}]
+    d = doc({"type": "taskList", "content": items})
+    assert adf_to_markdown(d) == "> [unsupported: taskList]\n>\n> one"
+
+
+def test_unknown_list_of_empty_items_stays_a_bare_marker() -> None:
+    d = doc({"type": "taskList", "content": [{"type": "taskItem", "content": []}]})
+    assert adf_to_markdown(d) == "[unsupported: taskList]"
+
+
+def test_unknown_leaf_inside_unknown_keeps_its_marker() -> None:
+    d = doc({"type": "panel", "content": [{"type": "extension", "attrs": {}}]})
+    assert adf_to_markdown(d) == "> [unsupported: panel]\n>\n> [unsupported: extension]"
+
+
+def test_unknown_type_below_another_unknown_keeps_its_marker() -> None:
+    task_list = {"type": "taskList", "content": [{"type": "taskItem", "content": [text("one")]}]}
+    d = doc({"type": "panel", "content": [task_list]})
+    assert adf_to_markdown(d) == (
+        "> [unsupported: panel]\n>\n> > [unsupported: taskList]\n> >\n> > one"
+    )
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        pytest.param(lambda node: quote(node), id="blockquote"),
+        pytest.param(lambda node: expand(node), id="expand"),
+        pytest.param(lambda node: table(table_row(table_cell(node))), id="table-cell"),
+        pytest.param(lambda node: bullet_list(list_item(node)), id="list"),
+    ],
+)
+def test_unknown_type_keeps_its_marker_through_known_containers(wrap: Any) -> None:
+    inner = {"type": "panel", "content": [para(text("danger"))]}
+    out = adf_to_markdown(doc({"type": "bodiedExtension", "content": [wrap(inner)]}))
+    assert out is not None
+    assert "[unsupported: bodiedExtension]" in out
+    assert "[unsupported: panel]" in out
+
+
+def test_unknown_inline_inside_unknown_block_stays_in_its_line() -> None:
+    node = {
+        "type": "weirdBlock",
+        "content": [text("due "), {"type": "date", "attrs": {"timestamp": "1"}}],
+    }
+    assert adf_to_markdown(doc(node)) == "> [unsupported: weirdBlock]\n>\n> due [unsupported: date]"
+
+
+@pytest.mark.parametrize(
+    "inline",
+    [
+        pytest.param({"type": "hardBreak"}, id="hardBreak"),
+        pytest.param({"type": "mention", "attrs": {"text": "@Ann"}}, id="mention"),
+        pytest.param({"type": "emoji", "attrs": {"shortName": ":ok:"}}, id="emoji"),
+        pytest.param({"type": "inlineCard", "attrs": {"url": "https://x/y"}}, id="inlineCard"),
+        pytest.param({"type": "mediaInline", "attrs": {"id": "m"}}, id="mediaInline"),
+        pytest.param({"type": "status", "attrs": {"text": "DONE"}}, id="status"),
+        pytest.param({"type": "date", "attrs": {"timestamp": "1"}}, id="date"),
+        pytest.param({"type": "placeholder", "attrs": {"text": "x"}}, id="placeholder"),
+        pytest.param({"type": "inlineExtension", "attrs": {}}, id="inlineExtension"),
+    ],
+)
+def test_inline_types_stay_in_one_block_under_an_unknown_node(inline: dict[str, Any]) -> None:
+    node = {"type": "weirdBlock", "content": [text("a "), inline, text(" b")]}
+    out = adf_to_markdown(doc(node))
+    assert out is not None
+    assert out.startswith("> [unsupported: weirdBlock]\n>\n> a ")
+    assert out.count("\n>\n") == 1
+
+
+def test_unhashable_child_type_does_not_cost_the_rest_of_the_block() -> None:
+    d = doc({"type": "panel", "content": [{"type": ["x"]}, para(text("kept"))]})
+    assert adf_to_markdown(d) == "> [unsupported: panel]\n>\n> [unsupported: ['x']]\n>\n> kept"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [[para()], ["junk", 42], [text("  ")]],
+    ids=["empty-paragraph", "non-dict-children", "whitespace-text"],
+)
+def test_unknown_block_with_nothing_to_show_stays_a_bare_marker(content: list[Any]) -> None:
+    assert adf_to_markdown(doc({"type": "panel", "content": content})) == "[unsupported: panel]"
+
+
+def test_unknown_block_resolves_embedded_media() -> None:
+    media_block = {
+        "type": "mediaSingle",
+        "content": [{"type": "media", "attrs": {"id": "ms", "alt": "mockup.png"}}],
+    }
+    d = doc({"type": "panel", "content": [media_block]})
+    out = adf_to_markdown(d, attachments=[_att("44416", "mockup.png")])
+    assert out == "> [unsupported: panel]\n>\n> [attachment: mockup.png (id=44416)]"
+
+
+def test_expand_inside_unknown_keeps_its_label() -> None:
+    d = doc({"type": "panel", "content": [expand(para(text("x")))]})
+    assert adf_to_markdown(d) == (
+        "> [unsupported: panel]\n>\n> > **Collapsed section in Jira: Details**\n> >\n> > x"
+    )
+
+
+def test_unknown_block_in_table_cell_stays_on_one_line() -> None:
+    d = doc(table(table_row(table_cell({"type": "panel", "content": [para(text("a"))]}))))
+    assert adf_to_markdown(d) == "|  |\n| --- |\n| > [unsupported: panel]<br>> a |"
 
 
 def test_unknown_inline_type_renders_placeholder() -> None:

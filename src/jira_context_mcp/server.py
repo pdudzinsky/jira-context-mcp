@@ -154,6 +154,15 @@ async def get_ticket_content(
 
     Checklist items read as in ``get_smart_checklist``.
 
+    In the description, a blockquote opening with
+    ``**Collapsed section in Jira: <title>**`` (``**Collapsed section in Jira**``
+    if untitled) holds text Jira hides until the reader expands it. It belongs
+    to the ticket but may be secondary or out of date, e.g. an earlier version
+    of the description, so judge it by its title if it has one.
+    ``[unsupported: <type>]`` marks a Jira element this server can't fully
+    represent; a blockquote opening with it holds that element's content.
+    Comments read the same, one quote level deeper, as each is quoted as a whole.
+
     Each attachment line normally ends with the file's Jira URL. Opening it
     requires Jira authentication, so read images, PDFs and text files via
     ``get_ticket_attachment``.

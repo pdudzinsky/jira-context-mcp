@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import logging
+import sys
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -183,6 +186,368 @@ class TestRequestRetry:
 
 
 # ===================================================================
+# Responses that must not pass for an empty answer
+# ===================================================================
+
+
+ISSUE_PATH = "/rest/api/3/issue/FOO-1"
+COMMENTS_PATH = f"{ISSUE_PATH}/comment"
+SEARCH_PATH = "/rest/api/3/search/jql"
+CHECKLIST_PATH = CHECKLIST_PROPERTY_PATH.format(key="FOO-1")
+
+GET_TICKET = (lambda c: c.get_ticket("FOO-1"), "GET", ISSUE_PATH)
+GET_COMMENTS = (lambda c: c.get_comments("FOO-1"), "GET", COMMENTS_PATH)
+GET_CHILDREN = (lambda c: c.get_children_of(["FOO-1"]), "POST", SEARCH_PATH)
+GET_CHECKLIST = (lambda c: c.get_checklist("FOO-1"), "GET", CHECKLIST_PATH)
+
+JSON_CALLS = [
+    pytest.param(*GET_TICKET, id="ticket"),
+    pytest.param(*GET_COMMENTS, id="comments"),
+    pytest.param(*GET_CHILDREN, id="children"),
+    pytest.param(*GET_CHECKLIST, id="checklist"),
+]
+
+
+@pytest.mark.usefixtures("no_sleep")
+class TestUnexpectedStatus:
+    @pytest.mark.parametrize("status", [300, 301, 302, 304, 307, 400, 405, 410, 422, 451, 999])
+    @pytest.mark.parametrize(("call", "method", "path"), JSON_CALLS)
+    async def test_raises_naming_the_request_without_retrying(
+        self, client_factory, base_url: str, call: Any, method: str, path: str, status: int
+    ) -> None:
+        async with client_factory(max_retries=2) as client:
+            with respx.mock(base_url=base_url) as router:
+                route = router.route(method=method, path=path).mock(
+                    return_value=httpx.Response(status, json={"errorMessages": ["nope"]})
+                )
+                with pytest.raises(JiraError, match=f"^{method} {path} returned {status}[^,]*$"):
+                    await call(client)
+        assert route.call_count == 1
+
+    async def test_failed_later_page_does_not_read_as_the_last_one(
+        self, client_factory, base_url: str
+    ) -> None:
+        first_page = {
+            "issues": [_ticket_payload("CH-1", parent="ROOT-1")],
+            "nextPageToken": "tok-2",
+            "isLast": False,
+        }
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.post(SEARCH_PATH).side_effect = [
+                    httpx.Response(200, json=first_page),
+                    httpx.Response(400, json={}),
+                ]
+                with pytest.raises(JiraError, match="returned 400 Bad Request"):
+                    await client.get_children_of(["ROOT-1"])
+
+    async def test_redirect_is_not_followed(self, client_factory, base_url: str) -> None:
+        """Only attachment downloads follow redirects, see ``TestDownloadAttachment``."""
+        target = "https://elsewhere.test/issue"
+        async with client_factory() as client:
+            with respx.mock(assert_all_called=False) as router:
+                router.get(f"{base_url}{ISSUE_PATH}").mock(
+                    return_value=httpx.Response(302, headers={"Location": target})
+                )
+                target_route = router.get(target).mock(
+                    return_value=httpx.Response(200, json=_ticket_payload("FOO-1"))
+                )
+                with pytest.raises(JiraError, match="returned 302 Found"):
+                    await client.get_ticket("FOO-1")
+        assert not target_route.called
+
+    @pytest.mark.parametrize("status", [200, 201, 203, 299])
+    async def test_any_2xx_with_a_readable_body_is_a_success(
+        self, client_factory, base_url: str, status: int
+    ) -> None:
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get(ISSUE_PATH).mock(
+                    return_value=httpx.Response(status, json=_ticket_payload("FOO-1"))
+                )
+                ticket = await client.get_ticket("FOO-1")
+        assert ticket.key == "FOO-1"
+
+    async def test_status_with_no_standard_phrase_reads_cleanly(
+        self, client_factory, base_url: str
+    ) -> None:
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get(ISSUE_PATH).mock(return_value=httpx.Response(999))
+                with pytest.raises(JiraError) as exc:
+                    await client.get_ticket("FOO-1")
+        assert str(exc.value) == f"GET {ISSUE_PATH} returned 999"
+
+    @pytest.mark.parametrize("status", [302, 400, 401, 403, 404, 429, 500, 599])
+    async def test_message_names_the_request_and_carries_no_secrets(
+        self, client_factory, base_url: str, status: int
+    ) -> None:
+        """Every branch of ``_request``, faced with a server echoing back what it received."""
+        basic_auth = base64.b64encode(b"test@example.com:dummy").decode()
+        echoed = f"dummy test@example.com Basic {basic_auth}"
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get(ISSUE_PATH).mock(
+                    return_value=httpx.Response(
+                        status,
+                        text=echoed,
+                        headers={"Location": f"https://elsewhere.test/?token={basic_auth}"},
+                        extensions={"reason_phrase": echoed.encode()},
+                    )
+                )
+                with pytest.raises(JiraError) as exc:
+                    await client.get_ticket("FOO-1")
+        message = str(exc.value)
+        assert message.startswith(f"GET {ISSUE_PATH} returned {status}")
+        for secret in ("dummy", "test@example.com", basic_auth, "elsewhere.test", "fields="):
+            assert secret not in message
+
+
+@pytest.mark.usefixtures("no_sleep")
+class TestUnreadableBody:
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(b"<html>Sign in</html>", id="html"),
+            pytest.param(b"", id="empty"),
+            pytest.param(b'{"key": "FOO-1"', id="truncated"),
+            pytest.param(b'{"key": "caf\xe9"}', id="not-utf8"),
+            pytest.param(b"[]", id="array"),
+            pytest.param(b"null", id="null"),
+            pytest.param(b'"oops"', id="string"),
+        ],
+    )
+    @pytest.mark.parametrize(("call", "method", "path"), JSON_CALLS)
+    async def test_body_that_is_no_json_object_raises(
+        self, client_factory, base_url: str, call: Any, method: str, path: str, body: bytes
+    ) -> None:
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.route(method=method, path=path).mock(
+                    return_value=httpx.Response(200, content=body)
+                )
+                with pytest.raises(JiraError):
+                    await call(client)
+
+    @pytest.mark.parametrize(
+        ("call", "method", "path", "body"),
+        [
+            pytest.param(*GET_TICKET, {}, id="ticket-no-key"),
+            pytest.param(*GET_TICKET, {"errorMessages": ["nope"]}, id="ticket-error-envelope"),
+            pytest.param(*GET_TICKET, {"key": "FOO-1", "fields": "x"}, id="ticket-fields-not-dict"),
+            pytest.param(*GET_TICKET, {"key": 1}, id="ticket-key-not-str"),
+            pytest.param(*GET_COMMENTS, {"comments": 5}, id="comments-not-list"),
+            pytest.param(*GET_COMMENTS, {"comments": [1]}, id="comment-not-dict"),
+            pytest.param(*GET_CHILDREN, {"issues": 5}, id="issues-not-list"),
+            pytest.param(*GET_CHILDREN, {"issues": [1]}, id="issue-not-dict"),
+            pytest.param(*GET_CHILDREN, {"issues": [{}]}, id="issue-no-key"),
+        ],
+    )
+    async def test_json_of_another_shape_raises_naming_the_request(
+        self, client_factory, base_url: str, call: Any, method: str, path: str, body: Any
+    ) -> None:
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.route(method=method, path=path).mock(
+                    return_value=httpx.Response(200, json=body)
+                )
+                with pytest.raises(JiraError, match=f"^{method} {path} returned 200 OK, but"):
+                    await call(client)
+
+    async def test_2xx_with_no_content_raises_naming_its_status(
+        self, client_factory, base_url: str
+    ) -> None:
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get(ISSUE_PATH).mock(return_value=httpx.Response(204))
+                with pytest.raises(JiraError, match="returned 204 No Content, but"):
+                    await client.get_ticket("FOO-1")
+
+    async def test_nesting_too_deep_to_read_raises(self, client_factory, base_url: str) -> None:
+        """Depending on the Python version, the JSON decoder or ``_utf8_safe`` gives up first."""
+        depth = sys.getrecursionlimit() * 2
+        description = b'{"content":[' * depth + b"]}" * depth
+        body = b'{"key": "FOO-1", "fields": {"description": ' + description + b"}}"
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get(ISSUE_PATH).mock(return_value=httpx.Response(200, content=body))
+                with pytest.raises(JiraError, match="returned 200 OK, but") as exc:
+                    await client.get_ticket("FOO-1")
+        assert isinstance(exc.value.__cause__, RecursionError)
+
+    async def test_body_stays_out_of_the_message(self, client_factory, base_url: str) -> None:
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get(ISSUE_PATH).mock(
+                    return_value=httpx.Response(200, text="<html>REFLECTED</html>")
+                )
+                with pytest.raises(JiraError) as exc:
+                    await client.get_ticket("FOO-1")
+        assert "REFLECTED" not in str(exc.value)
+
+    async def test_cause_reaches_the_log(
+        self, client_factory, base_url: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A tool response holds only the message, so the log is where a mapping bug shows."""
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get(ISSUE_PATH).mock(return_value=httpx.Response(200, json=[]))
+                with (
+                    caplog.at_level(logging.WARNING, logger="jira_context_mcp.jira"),
+                    pytest.raises(JiraError) as exc,
+                ):
+                    await client.get_ticket("FOO-1")
+        assert isinstance(exc.value.__cause__, AttributeError)
+        assert "AttributeError" in caplog.text
+        assert "AttributeError" not in str(exc.value)
+
+    async def test_corrupt_compressed_body_raises_naming_the_request(
+        self, client_factory, base_url: str
+    ) -> None:
+        """httpx decompresses while receiving, so this fails before there is a response to read."""
+        corrupt = httpx.Response(
+            200, headers={"Content-Encoding": "gzip"}, stream=httpx.ByteStream(b"not gzip")
+        )
+        async with client_factory(max_retries=2) as client:
+            with respx.mock(base_url=base_url) as router:
+                route = router.get(ISSUE_PATH).mock(return_value=corrupt)
+                with pytest.raises(JiraError, match=f"^GET {ISSUE_PATH} failed: DecodingError$"):
+                    await client.get_ticket("FOO-1")
+        assert route.call_count == 1
+
+
+def _error_name(error: Exception) -> str:
+    return type(error).__name__
+
+
+@pytest.mark.usefixtures("no_sleep")
+class TestTransportFailure:
+    @pytest.mark.parametrize(
+        "error",
+        [
+            httpx.RemoteProtocolError("Server disconnected without sending a response."),
+            httpx.ProxyError("502 Bad Gateway"),
+            httpx.ReadError("Connection reset by peer"),
+            httpx.ConnectTimeout("timed out"),
+        ],
+        ids=_error_name,
+    )
+    async def test_failure_that_can_pass_is_retried(
+        self, client_factory, base_url: str, error: Exception
+    ) -> None:
+        async with client_factory(max_retries=1) as client:
+            with respx.mock(base_url=base_url) as router:
+                route = router.get(ISSUE_PATH)
+                route.side_effect = [error, httpx.Response(200, json=_ticket_payload("FOO-1"))]
+                ticket = await client.get_ticket("FOO-1")
+        assert ticket.key == "FOO-1"
+        assert route.call_count == 2
+
+    @pytest.mark.parametrize(("call", "method", "path"), JSON_CALLS)
+    async def test_exhausted_retries_raise_naming_the_request(
+        self, client_factory, base_url: str, call: Any, method: str, path: str
+    ) -> None:
+        async with client_factory(max_retries=1) as client:
+            with respx.mock(base_url=base_url) as router:
+                route = router.route(method=method, path=path).mock(
+                    side_effect=httpx.RemoteProtocolError("peer closed connection")
+                )
+                with pytest.raises(JiraError) as exc:
+                    await call(client)
+        assert str(exc.value) == f"{method} {path} failed after 2 attempt(s): RemoteProtocolError"
+        assert route.call_count == 2
+
+    @pytest.mark.parametrize(
+        ("error", "detail"),
+        [
+            pytest.param(
+                httpx.ConnectError("All connection attempts failed"),
+                "ConnectError: All connection attempts failed",
+                id="connect-error",
+            ),
+            pytest.param(httpx.ReadTimeout("timed out"), "ReadTimeout: timed out", id="timeout"),
+            pytest.param(httpx.ReadTimeout(""), "ReadTimeout", id="timeout-with-no-text"),
+            pytest.param(
+                httpx.RemoteProtocolError("illegal header line: Authorization: Basic SECRET"),
+                "RemoteProtocolError",
+                id="protocol-error-quoting-the-server",
+            ),
+            pytest.param(httpx.ProxyError("502 SECRET"), "ProxyError", id="proxy-error"),
+        ],
+    )
+    async def test_only_socket_level_text_reaches_the_message(
+        self, client_factory, base_url: str, error: Exception, detail: str
+    ) -> None:
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get(ISSUE_PATH).mock(side_effect=error)
+                with pytest.raises(JiraError) as exc:
+                    await client.get_ticket("FOO-1")
+        assert str(exc.value) == f"GET {ISSUE_PATH} failed after 1 attempt(s): {detail}"
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            httpx.LocalProtocolError("Illegal header value SECRET"),
+            httpx.UnsupportedProtocol("SECRET"),
+            httpx.DecodingError("SECRET"),
+            httpx.TooManyRedirects("SECRET"),
+        ],
+        ids=_error_name,
+    )
+    async def test_failure_another_attempt_cannot_fix_raises_at_once(
+        self, client_factory, base_url: str, error: Exception
+    ) -> None:
+        async with client_factory(max_retries=2) as client:
+            with respx.mock(base_url=base_url) as router:
+                route = router.get(ISSUE_PATH).mock(side_effect=error)
+                with pytest.raises(JiraError) as exc:
+                    await client.get_ticket("FOO-1")
+        assert str(exc.value) == f"GET {ISSUE_PATH} failed: {_error_name(error)}"
+        assert route.call_count == 1
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            pytest.param("FOO-1\n", id="line-break"),
+            pytest.param("FOO-\ud83d", id="lone-surrogate"),
+            pytest.param("x" * 70_000, id="too-long"),
+        ],
+    )
+    async def test_key_httpx_refuses_raises_with_a_message_stdio_can_carry(
+        self, client_factory, key: str
+    ) -> None:
+        """A lone surrogate in a tool response ends the stdio server, a line break forges lines."""
+        async with client_factory() as client:
+            with pytest.raises(JiraError, match=r"is not a valid request$") as exc:
+                await client.get_ticket(key)
+        message = str(exc.value)
+        message.encode("utf-8")
+        assert "\n" not in message
+        assert len(message) < 300
+
+    async def test_encoded_line_break_in_a_key_stays_encoded_in_the_message(
+        self, client_factory, base_url: str
+    ) -> None:
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.route().mock(return_value=httpx.Response(400))
+                with pytest.raises(JiraError) as exc:
+                    await client.get_ticket("FOO%0AError:%20forged")
+        assert str(exc.value) == (
+            "GET /rest/api/3/issue/FOO%0AError:%20forged returned 400 Bad Request"
+        )
+
+    async def test_query_stays_out_of_the_message(self, client_factory, base_url: str) -> None:
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get(ISSUE_PATH).mock(side_effect=httpx.ConnectError("refused"))
+                with pytest.raises(JiraError) as exc:
+                    await client.get_ticket("FOO-1")
+        assert "fields=" not in str(exc.value)
+
+
+# ===================================================================
 # Public API: get_ticket / get_checklist / get_comments / get_children_of
 # ===================================================================
 
@@ -299,28 +664,16 @@ class TestPublicApi:
         assert cl is not None
         assert cl.is_empty
 
-    @pytest.mark.parametrize(
-        ("status", "body", "reason"),
-        [
-            (400, {"json": {"errorMessages": ["bad"]}}, "HTTP 400"),
-            (302, {"headers": {"location": "https://elsewhere.test"}}, "HTTP 302"),
-            (200, {"text": "<html>down</html>"}, "response is not JSON"),
-            (200, {"json": ["- item"]}, "no value in the response"),
-            (200, {"json": 42}, "no value in the response"),
-            (200, {"json": {"key": "x"}}, "no value in the response"),
-        ],
-        ids=["bad-request", "redirect", "not-json", "a-list", "a-number", "no-value"],
-    )
-    async def test_get_checklist_with_unexpected_response_raises(
-        self, client_factory, base_url: str, status: int, body: dict[str, Any], reason: str
+    async def test_get_checklist_with_no_value_in_the_response_raises(
+        self, client_factory, base_url: str
     ) -> None:
         """A response that holds no property value must not read as an empty checklist."""
         async with client_factory() as client:
             with respx.mock(base_url=base_url) as router:
                 router.get(CHECKLIST_PROPERTY_PATH.format(key="FOO-1")).mock(
-                    return_value=httpx.Response(status, **body)
+                    return_value=httpx.Response(200, json={"key": "x"})
                 )
-                with pytest.raises(JiraError, match=f"checklist property of FOO-1: {reason}"):
+                with pytest.raises(JiraError, match="body is not the expected JSON"):
                     await client.get_checklist("FOO-1")
 
     async def test_get_checklist_with_task_list_preserves_statuses(
@@ -886,6 +1239,154 @@ class TestDownloadAttachment:
                 data, _ = await client.download_attachment(self.CONTENT_URL, max_bytes=1024)
         assert data == b"DATA"
         assert "MEDIA-SECRET" not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("status", "phrase"),
+        [
+            pytest.param(300, "Multiple Choices", id="300"),
+            pytest.param(302, "Found", id="302-no-location"),
+            pytest.param(304, "Not Modified", id="304"),
+        ],
+    )
+    async def test_final_3xx_is_not_an_empty_download(
+        self, client_factory, base_url: str, status: int, phrase: str
+    ) -> None:
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/attachment/content/12345").mock(
+                    return_value=httpx.Response(status)
+                )
+                with pytest.raises(JiraError) as exc:
+                    await client.download_attachment(self.CONTENT_URL, max_bytes=1024)
+        assert str(exc.value) == (
+            f"GET /rest/api/3/attachment/content/12345 returned {status} {phrase}"
+        )
+
+    @pytest.mark.parametrize("status", [401, 403, 404, 500])
+    async def test_status_message_holds_neither_host_nor_query_nor_server_text(
+        self, client_factory, base_url: str, status: int
+    ) -> None:
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/attachment/content/12345").mock(
+                    return_value=httpx.Response(
+                        status,
+                        text="BODY-SECRET",
+                        extensions={"reason_phrase": b"REASON-SECRET"},
+                    )
+                )
+                with pytest.raises(JiraError) as exc:
+                    await client.download_attachment(
+                        f"{self.CONTENT_URL}?token=QUERY-SECRET", max_bytes=1024
+                    )
+        message = str(exc.value)
+        assert message.startswith(f"GET /rest/api/3/attachment/content/12345 returned {status} ")
+        assert "SECRET" not in message
+        assert "example.atlassian.net" not in message
+
+    async def test_failed_redirect_target_stays_out_of_the_message_with_its_token(
+        self, client_factory
+    ) -> None:
+        redirect_target = "https://cdn.example.com/blob?token=MEDIA-SECRET"
+        async with client_factory() as client:
+            with respx.mock(assert_all_called=False) as router:
+                router.get(self.CONTENT_URL).mock(
+                    return_value=httpx.Response(303, headers={"Location": redirect_target})
+                )
+                router.get(redirect_target).mock(return_value=httpx.Response(500))
+                with pytest.raises(JiraError) as exc:
+                    await client.download_attachment(self.CONTENT_URL, max_bytes=1024)
+        assert str(exc.value) == (
+            "GET /rest/api/3/attachment/content/12345 returned 500 Internal Server Error"
+        )
+
+    async def test_redirect_loop_raises(self, client_factory) -> None:
+        async with client_factory() as client:
+            with respx.mock() as router:
+                router.get(self.CONTENT_URL).mock(
+                    return_value=httpx.Response(303, headers={"Location": self.CONTENT_URL})
+                )
+                with pytest.raises(JiraError) as exc:
+                    await client.download_attachment(self.CONTENT_URL, max_bytes=1024)
+        assert str(exc.value) == "attachment download failed: TooManyRedirects"
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            httpx.RemoteProtocolError("illegal status line SECRET"),
+            httpx.ProxyError("502 SECRET"),
+            httpx.UnsupportedProtocol("SECRET"),
+        ],
+        ids=_error_name,
+    )
+    async def test_transport_failure_raises_once_without_its_text(
+        self, client_factory, base_url: str, error: Exception
+    ) -> None:
+        """Downloads aren't retried, see Known limitations in the README."""
+        async with client_factory(max_retries=2) as client:
+            with respx.mock(base_url=base_url) as router:
+                route = router.get("/rest/api/3/attachment/content/12345").mock(side_effect=error)
+                with pytest.raises(JiraError) as exc:
+                    await client.download_attachment(self.CONTENT_URL, max_bytes=1024)
+        assert str(exc.value) == f"attachment download failed: {_error_name(error)}"
+        assert route.call_count == 1
+
+    async def test_socket_level_text_reaches_the_message(
+        self, client_factory, base_url: str
+    ) -> None:
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/attachment/content/12345").mock(
+                    side_effect=httpx.ConnectError("All connection attempts failed")
+                )
+                with pytest.raises(JiraError) as exc:
+                    await client.download_attachment(self.CONTENT_URL, max_bytes=1024)
+        assert str(exc.value) == (
+            "attachment download failed: ConnectError: All connection attempts failed"
+        )
+
+    async def test_connection_dropped_mid_download_raises(
+        self, client_factory, base_url: str
+    ) -> None:
+        class _DroppedStream(httpx.AsyncByteStream):
+            async def __aiter__(self) -> AsyncIterator[bytes]:
+                yield b"partial"
+                raise httpx.RemoteProtocolError("peer closed connection")
+
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/attachment/content/12345").mock(
+                    return_value=httpx.Response(200, stream=_DroppedStream())
+                )
+                with pytest.raises(JiraError) as exc:
+                    await client.download_attachment(self.CONTENT_URL, max_bytes=1024)
+        assert str(exc.value) == "attachment download failed: RemoteProtocolError"
+
+    async def test_corrupt_compressed_body_raises(self, client_factory, base_url: str) -> None:
+        corrupt = httpx.Response(
+            200, headers={"Content-Encoding": "gzip"}, stream=httpx.ByteStream(b"not gzip")
+        )
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get("/rest/api/3/attachment/content/12345").mock(return_value=corrupt)
+                with pytest.raises(JiraError) as exc:
+                    await client.download_attachment(self.CONTENT_URL, max_bytes=1024)
+        assert str(exc.value) == "attachment download failed: DecodingError"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            pytest.param("https://example.atlassian.net/SECRET\n/1", id="line-break"),
+            pytest.param("https://xn--a/SECRET/1", id="invalid-punycode-host"),
+        ],
+    )
+    async def test_url_httpx_refuses_raises_without_quoting_it(
+        self, client_factory, url: str
+    ) -> None:
+        async with client_factory() as client:
+            with pytest.raises(JiraError) as exc:
+                await client.download_attachment(url, max_bytes=1024)
+        assert str(exc.value) == "attachment download failed: invalid URL"
 
 
 # ===================================================================

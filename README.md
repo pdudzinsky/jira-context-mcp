@@ -215,7 +215,7 @@ The server needs three required environment variables — `JIRA_BASE_URL`, `JIRA
 | `JIRA_EMAIL` | yes | — | The account that owns the API token |
 | `JIRA_API_TOKEN` | yes | — | [Create one here](https://id.atlassian.com/manage-profile/security/api-tokens) |
 | `REQUEST_TIMEOUT` | no | `30.0` | Per-request HTTP timeout in seconds |
-| `MAX_RETRIES` | no | `3` | Additional attempts on transient failures (429, 5xx, network errors) |
+| `MAX_RETRIES` | no | `3` | Additional attempts on transient failures (429, 5xx, network, protocol and proxy errors) |
 | `JIRA_ATTACHMENT_MAX_MB` | no | `20` | Hard cap on attachment download size. `get_ticket_attachment` refuses larger files and returns an `Error: attachment too large …` string with the original `content_url` |
 
 ### Claude Desktop (macOS)
@@ -374,7 +374,6 @@ All errors come back as the tool response (a string starting with `Error:`) rath
 - `Error: invalid Jira configuration — ...` — env vars are set but malformed (e.g. base URL isn't a valid URL)
 - `Error: Jira authentication failed. ...` — wrong email/token (or whitespace polluting the token)
 - `Error: ticket(s) not found in Jira: PROJ-1234` — typo, deleted, or your token lacks access
-- `Error: Jira request failed — ...` — a network or server error after retries, or a checklist response that holds no property value
 - `Error: Jira rate limit exceeded after retries. ...` — back off and retry
 - `Error: invalid depth parameter. ...` — `depth_up` was `< 1`
 - `Error: hierarchy cycle detected. ...` — parent link loop in Jira (shouldn't happen, but defensive)
@@ -382,6 +381,11 @@ All errors come back as the tool response (a string starting with `Error:`) rath
 - `Error: attachment too large (X MB > limit Y MB). Download manually from <url>` — exceeds `JIRA_ATTACHMENT_MAX_MB`
 - `Error: unsupported mime type 'X'. Tool supports image/*, application/pdf, text/*. ...` — e.g. `.docx` / `.zip` / video; the message includes the original URL for manual download
 - `Error: attachment exceeds size cap — ...` — the file's `Content-Length` (or accumulated stream bytes) crossed the cap mid-download
+- `Error: Jira request failed — GET /rest/api/3/issue/PROJ-1234/comment returned 400 Bad Request` — any status outside 2xx with no line of its own above, including a 5xx still failing after retries. The message names the request and the status and nothing else: no query string, headers or response body. A 3xx usually means `JIRA_BASE_URL` is out of date, since API calls don't follow redirects (attachment downloads do)
+- `Error: Jira request failed — GET /rest/api/3/issue/PROJ-1234 returned 200 OK, but the body is not the expected JSON` — something other than the Jira API answered, such as an SSO or proxy page; the server log has the cause at WARNING
+- `Error: Jira request failed — GET /rest/api/3/issue/PROJ-1234 failed after 4 attempt(s): ConnectError: All connection attempts failed` — Jira couldn't be reached, or the connection broke, on every attempt (see `MAX_RETRIES`). Timeouts and network errors quote the socket or TLS reason; protocol and proxy errors name only their type, because their text can quote what the server sent. `… failed: DecodingError` with no attempt count means another attempt couldn't help, so there was none
+- `Error: Jira request failed — attachment download failed: RemoteProtocolError` — the same for a download, which gets one attempt
+- `Error: Jira request failed — GET '/rest/api/3/issue/PROJ-1234\n' is not a valid request` — the issue key holds something a URL can't, such as a line break
 
 ### From the shell (no MCP client needed)
 
@@ -449,7 +453,7 @@ uv run python -m jira_context_mcp  # stdio server — blocks waiting for MCP han
 Run the test suite, linter, and type checker:
 
 ```bash
-uv run pytest                       # ~2s
+uv run pytest                       # ~5s
 uv run ruff check src tests         # lint
 uv run ruff format src tests        # format (auto-applies)
 uv run ruff format --check src tests  # format check (CI-style)

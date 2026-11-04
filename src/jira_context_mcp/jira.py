@@ -17,6 +17,8 @@ import json
 import logging
 import random
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from types import TracebackType
 from typing import Any, Final
@@ -104,6 +106,13 @@ _JQL_FIELDS: Final = ["summary", "status", "issuetype", "assignee", "parent"]
 
 _BACKOFF_BASE_SECONDS: Final = 1.0
 _BACKOFF_MAX_SECONDS: Final = 30.0
+# Failures that can pass by themselves. Repeating a call is safe, as every one only reads.
+_RETRIED_TRANSPORT_ERRORS: Final = (
+    httpx.TimeoutException,
+    httpx.NetworkError,
+    httpx.RemoteProtocolError,
+    httpx.ProxyError,
+)
 
 # Smart Checklist grammar. Status lives inline, in the marker that starts the line:
 # https://railsware.atlassian.net/wiki/spaces/CHK/pages/90636343/Formatting+Guide+Markdown
@@ -256,9 +265,10 @@ class JiraClient:
             ticket = await client.get_ticket("PROJ-1234")
 
     Auth failures, missing issues, and unresolved rate limits surface as
-    :class:`JiraError` subclasses. Transient network errors and 5xx responses
-    are retried with exponential backoff and full jitter up to
-    ``settings.max_retries`` additional attempts.
+    :class:`JiraError` subclasses; any other status outside 2xx, a 2xx body that
+    isn't the expected JSON and a transport failure as :class:`JiraError` itself.
+    Transient transport errors and 5xx responses are retried with exponential
+    backoff and full jitter up to ``settings.max_retries`` additional attempts.
     """
 
     def __init__(
@@ -317,7 +327,8 @@ class JiraClient:
             )
         except JiraNotFoundError as e:
             raise JiraNotFoundError(str(e), key=key) from e
-        return self._to_ticket(_utf8_safe(response.json()))
+        with _reading_body(response):
+            return self._to_ticket(_utf8_safe(response.json()))
 
     async def get_checklist(self, key: str) -> Checklist | None:
         """Fetch the Smart Checklist for ``key``, or ``None`` if Jira answers 404.
@@ -336,15 +347,8 @@ class JiraClient:
         )
         if response.status_code == 404:
             return None
-        if response.status_code != 200:
-            raise JiraError(f"checklist property of {key}: HTTP {response.status_code}")
-        try:
-            payload = _utf8_safe(response.json())
-        except ValueError as e:
-            raise JiraError(f"checklist property of {key}: response is not JSON") from e
-        if not isinstance(payload, dict) or "value" not in payload:
-            raise JiraError(f"checklist property of {key}: no value in the response")
-        value = payload["value"]
+        with _reading_body(response):
+            value = _utf8_safe(response.json())["value"]
         if value is None:
             return Checklist(sections=[])
         if isinstance(value, str):
@@ -368,22 +372,23 @@ class JiraClient:
             f"/rest/api/3/issue/{key}/comment",
             params={"maxResults": 100},
         )
-        payload = _utf8_safe(response.json())
-        raw_comments = payload.get("comments") or []
-        total = payload.get("total")
-        if isinstance(total, int) and total > len(raw_comments):
-            logger.warning(
-                "Comment pagination not implemented; returning first %d of %d "
-                "for %s. See https://github.com/pdudzinsky/jira-context-mcp/issues",
-                len(raw_comments),
-                total,
-                key,
-            )
-        comments: list[Comment] = []
-        for raw in raw_comments:
-            parsed = _parse_comment(raw)
-            if parsed is not None:
-                comments.append(parsed)
+        with _reading_body(response):
+            payload = _utf8_safe(response.json())
+            raw_comments = payload.get("comments") or []
+            total = payload.get("total")
+            if isinstance(total, int) and total > len(raw_comments):
+                logger.warning(
+                    "Comment pagination not implemented; returning first %d of %d "
+                    "for %s. See https://github.com/pdudzinsky/jira-context-mcp/issues",
+                    len(raw_comments),
+                    total,
+                    key,
+                )
+            comments: list[Comment] = []
+            for raw in raw_comments:
+                parsed = _parse_comment(raw)
+                if parsed is not None:
+                    comments.append(parsed)
         return comments
 
     async def get_children_of(self, parent_keys: list[str]) -> dict[str, list[Ticket]]:
@@ -408,12 +413,13 @@ class JiraClient:
             if next_token:
                 body["nextPageToken"] = next_token
             response = await self._request("POST", "/rest/api/3/search/jql", json=body)
-            data = _utf8_safe(response.json())
-            for issue in data.get("issues") or []:
-                ticket = self._to_ticket(issue)
-                if ticket.parent_key in result:
-                    result[ticket.parent_key].append(ticket)
-            next_token = data.get("nextPageToken")
+            with _reading_body(response):
+                data = _utf8_safe(response.json())
+                for issue in data.get("issues") or []:
+                    ticket = self._to_ticket(issue)
+                    if ticket.parent_key in result:
+                        result[ticket.parent_key].append(ticket)
+                next_token = data.get("nextPageToken")
             if data.get("isLast") or not next_token:
                 break
         return result
@@ -426,6 +432,11 @@ class JiraClient:
         allow_404: bool = False,
         **kwargs: Any,
     ) -> httpx.Response:
+        """Send a request and return a 2xx response, or a 404 when ``allow_404`` is set.
+
+        Every other status raises a :class:`JiraError`, after retries for 429 and 5xx.
+        A redirect is one of them: unlike ``download_attachment``, this doesn't follow it.
+        """
         if self._client is None:
             raise RuntimeError("JiraClient used outside of its async context manager")
 
@@ -433,22 +444,32 @@ class JiraClient:
             is_last = attempt == self._max_retries
             try:
                 response = await self._client.request(method, url, **kwargs)
-            except (httpx.TimeoutException, httpx.NetworkError) as e:
+            except _RETRIED_TRANSPORT_ERRORS as e:
                 if is_last:
-                    raise JiraError(f"network error after {attempt + 1} attempt(s): {e}") from e
+                    raise JiraError(
+                        f"{method} {url} failed after {attempt + 1} attempt(s): "
+                        f"{_describe_transport_error(e)}"
+                    ) from e
                 await asyncio.sleep(_compute_backoff(attempt))
                 continue
+            except httpx.HTTPError as e:
+                raise JiraError(f"{method} {url} failed: {_describe_transport_error(e)}") from e
+            except (httpx.InvalidURL, UnicodeError) as e:
+                # What httpx refused is in ``url``: a line break, a lone surrogate, sheer length.
+                raise JiraError(f"{method} {url[:200]!r} is not a valid request") from e
 
             code = response.status_code
+            if response.is_success or (code == 404 and allow_404):
+                return response
+
+            outcome = _describe_response(response)
             if code in (401, 403):
-                raise JiraAuthError(
-                    f"{code} {response.reason_phrase} — check JIRA_EMAIL and JIRA_API_TOKEN"
-                )
-            if code == 404 and not allow_404:
-                raise JiraNotFoundError(f"{method} {url} returned 404")
+                raise JiraAuthError(outcome)
+            if code == 404:
+                raise JiraNotFoundError(outcome)
             if code == 429:
                 if is_last:
-                    raise JiraRateLimitError(f"rate-limited after {attempt + 1} attempt(s)")
+                    raise JiraRateLimitError(f"{outcome} after {attempt + 1} attempt(s)")
                 server_hint = _parse_retry_after(response)
                 sleep = max(server_hint, _compute_backoff(attempt))
                 logger.warning(
@@ -463,12 +484,10 @@ class JiraClient:
                 continue
             if 500 <= code < 600:
                 if is_last:
-                    body = _utf8_safe(response.text[:200])
-                    raise JiraError(f"server error {code} after {attempt + 1} attempt(s): {body}")
+                    raise JiraError(f"{outcome} after {attempt + 1} attempt(s)")
                 await asyncio.sleep(_compute_backoff(attempt))
                 continue
-
-            return response
+            raise JiraError(outcome)
 
         raise JiraError("retry loop exited without returning — unreachable")
 
@@ -527,22 +546,22 @@ class JiraClient:
             JiraAttachmentTooLargeError: ``Content-Length`` header (when
                 present) exceeds ``max_bytes``, or accumulated bytes exceed
                 it mid-stream.
-            JiraError: any other transport / server failure.
+            JiraError: any other status outside 2xx once redirects are followed,
+                or a transport failure.
         """
         if self._client is None:
             raise RuntimeError("JiraClient used outside of its async context manager")
 
         try:
             async with self._client.stream("GET", content_url, follow_redirects=True) as response:
+                outcome = _describe_response(response)
                 code = response.status_code
                 if code in (401, 403):
-                    raise JiraAuthError(
-                        f"{code} {response.reason_phrase} — check JIRA_EMAIL and JIRA_API_TOKEN"
-                    )
+                    raise JiraAuthError(outcome)
                 if code == 404:
-                    raise JiraNotFoundError(f"GET {content_url} returned 404")
-                if code >= 400:
-                    raise JiraError(f"attachment download failed: HTTP {code}")
+                    raise JiraNotFoundError(outcome)
+                if not response.is_success:
+                    raise JiraError(outcome)
 
                 content_length = response.headers.get("content-length")
                 if content_length:
@@ -584,8 +603,56 @@ class JiraClient:
                     .strip()
                 )
                 return b"".join(chunks), mime_type
-        except (httpx.TimeoutException, httpx.NetworkError) as e:
-            raise JiraError(f"network error during attachment download: {e}") from e
+        except httpx.HTTPError as e:
+            raise JiraError(f"attachment download failed: {_describe_transport_error(e)}") from e
+        except (httpx.InvalidURL, UnicodeError) as e:
+            raise JiraError("attachment download failed: invalid URL") from e
+
+
+def _describe_transport_error(error: httpx.HTTPError) -> str:
+    """Name a transport failure, e.g. ``ConnectError: All connection attempts failed``.
+
+    Timeouts and network errors come from the socket or TLS layer, so their text is
+    safe to quote and says what went wrong. Any other error is named by type alone: its
+    text can quote what the server sent, like the header line h11 rejected.
+    """
+    name = type(error).__name__
+    if isinstance(error, (httpx.TimeoutException, httpx.NetworkError)) and str(error):
+        return f"{name}: {error}"
+    return name
+
+
+def _describe_response(response: httpx.Response) -> str:
+    """Name a response's request and status, e.g. ``GET /path returned 400 Bad Request``.
+
+    Built from the method, the URL path and the status code alone, so that no body, reason
+    phrase or query string can carry a secret into an error message. After a redirect it
+    names the request this client made, not the target the server chose. The path stays
+    percent-encoded, which keeps the message on one line.
+    """
+    request = response.history[0].request if response.history else response.request
+    code = response.status_code
+    status = f"{code} {httpx.codes.get_reason_phrase(code)}".rstrip()
+    path = request.url.raw_path.partition(b"?")[0].decode("ascii")
+    return f"{request.method} {path} returned {status}"
+
+
+@contextmanager
+def _reading_body(response: httpx.Response) -> Iterator[None]:
+    """Report a 2xx body that isn't the JSON the block expects as a :class:`JiraError`.
+
+    The block only maps a body already received onto the models, so an error raised
+    there means the wrong body: malformed JSON or undecodable bytes (``ValueError``),
+    JSON of another shape, or values the models reject (pydantic's ``ValidationError``
+    is a ``ValueError`` too). A tool response holds only the message, which leaves the
+    log as the one place to tell such a body from a bug in the mapping itself.
+    """
+    try:
+        yield
+    except (AttributeError, LookupError, RecursionError, TypeError, ValueError) as e:
+        message = f"{_describe_response(response)}, but the body is not the expected JSON"
+        logger.warning("%s", message, exc_info=True)
+        raise JiraError(message) from e
 
 
 def _utf8_safe(value: Any) -> Any:
@@ -642,8 +709,10 @@ def _parse_attachments(
       sends a tz so this would only fire on synthetic / mangled payloads.
     - **Missing ``created``** — silently skipped, same reasoning.
 
-    Partial data must not break the tool response — every error path
-    drops the offending item and keeps going.
+    These kinds of partial data must not break the tool response: each such
+    item is dropped and the rest kept. A value of the wrong JSON type, such as
+    a numeric ``created`` or an ``author`` that isn't an object, fails the whole
+    response through :func:`_reading_body`.
 
     ``embedded_filenames`` (when provided) is the set of media filenames
     referenced from inside the description body. Each attachment is

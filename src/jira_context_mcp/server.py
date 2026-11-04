@@ -410,7 +410,7 @@ def _format_jira_errors(eg: BaseExceptionGroup[Exception]) -> str:
         if keys:
             return f"Error: ticket(s) not found in Jira: {', '.join(keys)}"
         msgs = "; ".join(str(e) for e in not_founds)
-        return f"Error: Jira returned 404 — {msgs}"
+        return f"Error: Jira request failed — {msgs}"
 
     rate_limits = [e for e in excs if isinstance(e, JiraRateLimitError)]
     if rate_limits:

@@ -13,6 +13,7 @@ site (typically once per MCP tool invocation).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import re
@@ -30,6 +31,7 @@ from .models import (
     ChecklistItem,
     ChecklistSection,
     ChecklistStatus,
+    ChecklistText,
     Comment,
     Ticket,
 )
@@ -103,17 +105,46 @@ _JQL_FIELDS: Final = ["summary", "status", "issuetype", "assignee", "parent"]
 _BACKOFF_BASE_SECONDS: Final = 1.0
 _BACKOFF_MAX_SECONDS: Final = 30.0
 
-# Legacy task-list form: optional bullet, then [<marker>] <name>
-# (status carried inline via the marker character).
-_CHECKLIST_TASK_RE: Final = re.compile(r"^\s*[-*]?\s*\[(.)\]\s+(.+?)\s*$")
-# Modern Smart Checklist v3 form: plain bullet item with no inline status —
-# statuses live in a sibling property (``SmartChecklist`` aggregate /
-# ``ItemStatusSearchMeta`` per-item hashes), so every parsed item defaults
-# to ``"open"`` here. Section headers ("# ...") are skipped silently.
-_CHECKLIST_BULLET_RE: Final = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
-_HEADER_RE: Final = re.compile(r"^\s*#")
+# Smart Checklist grammar. Status lives inline, in the marker that starts the line:
+# https://railsware.atlassian.net/wiki/spaces/CHK/pages/90636343/Formatting+Guide+Markdown
+#
+# Markers count only at the very start of a line. The plugin parses line by line and
+# its own counters (``totalChecklistItems``, the "Smart Checklist Progress" field) leave
+# indented lines out, while including items inside a code fence.
+_ITEM_STATUS: Final[dict[str, ChecklistStatus]] = {
+    "-": "open",
+    "+": "done",
+    "~": "in_progress",
+    "x": "skipped",
+}
+# ``!`` right after the marker makes the item mandatory. ``-`` and ``+`` may be followed
+# directly by the text (plugin release note v1.0.2, which also names ``#``). ``~`` and
+# ``x`` may not: "~~struck~~", "~>>LT-1" and "xylophone" are not items.
+_ITEM_RE: Final = re.compile(r"(?P<marker>[-+]|[~x](?=!?\s))(?P<mandatory>!?)\s*(?P<name>.+)")
+_EMPTY_ITEM_RE: Final = re.compile(r"[-+~x]!?|\s*\[[ xX~-]\]")
+# ``- [FAILED] text``. The name is at most 50 characters, the plugin's limit, and may sit
+# next to ``[key="value"]`` attributes, which stay in the item name. What follows the
+# bracket rules out a markdown link, ``- [text](url)``.
+_CUSTOM_STATUS_RE: Final = re.compile(
+    r"(?P<attributes>(?:\[\w+=[^\]]*\]\s*)*)"
+    r"\[\s*(?P<status>[^\[\]=\s][^\[\]=]{0,49}?)\s*\]"
+    r"(?:\s+|(?=\[))"
+    r"(?P<rest>.+)"
+)
+_HEADER_RE: Final = re.compile(r"(#{1,6})(?!#)\s*(.*)")
+# ``> text`` or ``>text`` below an item. A further ``>`` is a nested quote inside the detail.
+_DETAIL_RE: Final = re.compile(r">\s?(.*)")
+_SEPARATOR_RE: Final = re.compile(r"-{3,}")
+# Wrapper around items imported from a linked template, the items themselves are regular:
+# https://railsware.atlassian.net/wiki/spaces/CHK/pages/4000579601/Linked+Templates
+_LINKED_TEMPLATE_RE: Final = re.compile(r"(?:<<~|~>>)LT-\d+")
 
-_STATUS_MAP: Final[dict[str, ChecklistStatus]] = {
+# ``[x] text`` is not Smart Checklist syntax: the plugin doesn't document it, nor write it,
+# and Jira doesn't count such a line as an item. It is kept for compatibility. Its markers
+# are the ones this server prints, so they don't mean what they do at the start of a plugin
+# line: compare ``[x]`` (done) with ``x`` (skipped), and ``[~]`` (skipped) with ``~``.
+_TASK_LIST_RE: Final = re.compile(r"\s*\[([ xX~-])\]\s+(.+)")
+_TASK_LIST_STATUS: Final[dict[str, ChecklistStatus]] = {
     " ": "open",
     "x": "done",
     "X": "done",
@@ -125,78 +156,95 @@ _STATUS_MAP: Final[dict[str, ChecklistStatus]] = {
 def parse_checklist_markdown(raw: str) -> Checklist:
     """Parse a Smart Checklist markdown blob into a structured :class:`Checklist`.
 
-    Handles two formats:
+    Nothing that may carry content is dropped. Each line becomes one of:
 
-    1. **Modern (Smart Checklist v3+)** — plain bullet items ``- text``,
-       grouped under ``## section`` headers. Items default to status
-       ``"open"`` because per-item status lives in sibling Jira properties
-       (``SmartChecklist`` aggregate flags, ``ItemStatusSearchMeta`` hashes).
-    2. **Legacy task-list** — ``[ ] text`` / ``[x] text`` / ``[-] text`` /
-       ``[~] text`` with the status carried inline. Recognised for
-       backward compatibility with older instances and ad-hoc fixtures.
+    - a header (``#`` to ``######``), opening a :class:`ChecklistSection`;
+    - an item (see :data:`_ITEM_STATUS`, or :data:`_TASK_LIST_RE` for the bare ``[x] text``
+      form), optionally mandatory and with a custom status;
+    - a detail of the item right above it (``>``);
+    - :class:`ChecklistText`, for every line that is none of these. Jira shows such lines
+      but doesn't count them as items: bold sub-headings, notes, numbered or indented text.
 
-    Section grouping is preserved: each ``#``/``##`` header opens a new
-    :class:`ChecklistSection`. Items appearing before the first header are
-    grouped under a section with ``title=None``. Sections that contain no
-    items are kept in the structure (so the renderer can decide whether to
-    show or skip them); blank lines between items are ignored.
-
-    Lines with an unrecognised legacy marker are kept with status coerced
-    to ``"open"`` and a warning emitted.
+    Only lines with no content of their own disappear: blank lines, ``---`` separators,
+    linked-template wrappers and markers with no text. Content before the first header
+    goes to a section with ``title=None``. Sections with no entries are kept, because a
+    header can be a parent of the next one or a note in its own right.
     """
     sections: list[ChecklistSection] = []
     current_title: str | None = None
-    current_items: list[ChecklistItem] = []
+    current_level = 1
+    current_entries: list[ChecklistItem | ChecklistText] = []
     seen_any_section = False
 
     def flush() -> None:
-        # Don't emit a leading title=None section if it has no items —
+        # Don't emit a leading title=None section if it has no entries —
         # that's the common case where the first line of the markdown is
         # a header, and there is no orphan content to record.
-        if not seen_any_section and not current_items:
+        if not seen_any_section and not current_entries:
             return
-        sections.append(ChecklistSection(title=current_title, items=list(current_items)))
+        sections.append(
+            ChecklistSection(
+                title=current_title,
+                level=current_level,
+                entries=list(current_entries),
+            )
+        )
 
-    for line in raw.splitlines():
-        if not line.strip():
+    for raw_line in raw.splitlines():
+        line = raw_line.rstrip()
+        if (
+            not line
+            or _SEPARATOR_RE.fullmatch(line)
+            or _LINKED_TEMPLATE_RE.fullmatch(line)
+            or _EMPTY_ITEM_RE.fullmatch(line)
+        ):
             continue
 
-        if _HEADER_RE.match(line):
+        header = _HEADER_RE.fullmatch(line)
+        if header:
             flush()
-            current_title = line.lstrip("#").strip() or None
-            current_items = []
+            current_title = header.group(2).strip() or None
+            current_level = len(header.group(1))
+            current_entries = []
             seen_any_section = True
             continue
 
-        # Try the legacy task-list form first — it's the more specific shape
-        # ("- [ ] x" must not be parsed as a bare bullet of "[ ] x").
-        task = _CHECKLIST_TASK_RE.match(line)
-        if task:
-            marker = task.group(1)
-            name = task.group(2).strip()
-            if not name:
-                continue
-            status = _STATUS_MAP.get(marker)
-            if status is None:
-                logger.warning(
-                    "unknown Smart Checklist status marker [%s] in line: %r",
-                    marker,
-                    line,
-                )
-                status = "open"
-            current_items.append(ChecklistItem(name=name, status=status))
+        detail = _DETAIL_RE.fullmatch(line)
+        last = current_entries[-1] if current_entries else None
+        if detail and isinstance(last, ChecklistItem):
+            details = [*last.details, detail.group(1)]
+            current_entries[-1] = last.model_copy(update={"details": details})
             continue
 
-        bullet = _CHECKLIST_BULLET_RE.match(line)
-        if bullet:
-            name = bullet.group(1).strip()
-            if not name:
-                continue
-            current_items.append(ChecklistItem(name=name, status="open"))
-            continue
+        current_entries.append(_parse_item(line) or ChecklistText(text=line))
 
     flush()
     return Checklist(sections=sections)
+
+
+def _parse_item(line: str) -> ChecklistItem | None:
+    """Return the item ``line`` holds, or ``None`` if it isn't one."""
+    item = _ITEM_RE.fullmatch(line)
+    if item:
+        name = item.group("name")
+        custom_status = None
+        custom = _CUSTOM_STATUS_RE.fullmatch(name)
+        if custom:
+            custom_status = custom.group("status")
+            name = f"{custom.group('attributes').rstrip()} {custom.group('rest')}".strip()
+        return ChecklistItem(
+            name=name,
+            status=_ITEM_STATUS[item.group("marker")],
+            custom_status=custom_status,
+            mandatory=bool(item.group("mandatory")),
+        )
+
+    task = _TASK_LIST_RE.fullmatch(line)
+    if task:
+        marker, name = task.groups()
+        return ChecklistItem(name=name, status=_TASK_LIST_STATUS[marker])
+
+    return None
 
 
 class JiraClient:
@@ -272,11 +320,14 @@ class JiraClient:
         return self._to_ticket(response.json())
 
     async def get_checklist(self, key: str) -> Checklist | None:
-        """Fetch the Smart Checklist for ``key``, or ``None`` if absent.
+        """Fetch the Smart Checklist for ``key``, or ``None`` if Jira answers 404.
 
-        ``None`` means the plugin is not installed or the issue has no
-        checklist property; an empty but present checklist surfaces as a
-        :class:`Checklist` with no sections.
+        Jira answers 404 alike for an issue with no checklist property and for an
+        issue it doesn't show, so ``None`` says only that the property wasn't found.
+        An empty but present checklist surfaces as a :class:`Checklist` with no
+        sections. The plugin documents the value as raw markdown, so any other value
+        is kept as text rather than passing for an empty checklist. A response that
+        doesn't hold a property value raises :class:`JiraError`, for the same reason.
         """
         response = await self._request(
             "GET",
@@ -285,10 +336,26 @@ class JiraClient:
         )
         if response.status_code == 404:
             return None
-        value = response.json().get("value")
-        if not isinstance(value, str):
+        if response.status_code != 200:
+            raise JiraError(f"checklist property of {key}: HTTP {response.status_code}")
+        try:
+            payload = response.json()
+        except ValueError as e:
+            raise JiraError(f"checklist property of {key}: response is not JSON") from e
+        if not isinstance(payload, dict) or "value" not in payload:
+            raise JiraError(f"checklist property of {key}: no value in the response")
+        value = payload["value"]
+        if value is None:
             return Checklist(sections=[])
-        return parse_checklist_markdown(value)
+        if isinstance(value, str):
+            return parse_checklist_markdown(value)
+        logger.warning(
+            "Smart Checklist property of %s is %s, not markdown text",
+            key,
+            type(value).__name__,
+        )
+        text = ChecklistText(text=json.dumps(value, ensure_ascii=False))
+        return Checklist(sections=[ChecklistSection(title=None, entries=[text])])
 
     async def get_comments(self, key: str) -> list[Comment]:
         """Fetch the first page of comments for ``key`` (up to 100).

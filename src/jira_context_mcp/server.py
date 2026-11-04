@@ -37,6 +37,7 @@ from .jira import (
     JiraRateLimitError,
 )
 from .markdown import (
+    format_checklist_count,
     render_checklist,
     render_issue_tree,
     render_ticket_content,
@@ -151,6 +152,8 @@ async def get_ticket_content(
     walk the parent or child hierarchy — pair this with ``get_issue_tree`` when
     context from siblings or ancestors matters.
 
+    Checklist items read as in ``get_smart_checklist``.
+
     Each attachment line normally ends with the file's Jira URL. Opening it
     requires Jira authentication, so read images, PDFs and text files via
     ``get_ticket_attachment``.
@@ -206,15 +209,22 @@ async def get_ticket_content(
 async def get_smart_checklist(issue_key: str) -> str:
     """Return only the Smart Checklist (Acceptance Criteria) of one ticket.
 
-    The Railsware Smart Checklist plugin stores ACCs in a Jira issue
-    property (``com.railsware.SmartChecklist.checklist``) that the standard
-    Jira API endpoint does not expose. Many Atlassian Cloud teams use it as
-    the canonical location for ACCs/DoD, leaving the description minimal.
+    The Railsware Smart Checklist plugin keeps ACCs as raw markdown in a Jira
+    issue property (``com.railsware.SmartChecklist.checklist``), which a normal
+    issue fetch leaves out. Many Atlassian Cloud teams use it as the canonical
+    location for ACCs/DoD, leaving the description minimal.
 
     Use this tool when:
     - You only need the acceptance criteria of one ticket, no other context
     - You want a token-efficient alternative to ``get_ticket_content`` for
       ACC review
+
+    Reading the result: ``[ ]`` to do, ``[x]`` done, ``[-]`` in progress and
+    ``[~]`` skipped. ``(mandatory)`` marks a required item, ``[NAME]`` a custom
+    status (or plain text in brackets), and ``>`` lines give the item's details.
+    A line with no checkbox is text Jira doesn't count as an item. A checkbox
+    reflects the line's marker alone: Jira can treat a custom status as completed,
+    because that is configured there, so its progress can be higher than this count.
 
     Args:
         issue_key: Jira issue key, e.g. ``"PROJ-1234"``.
@@ -226,18 +236,20 @@ async def get_smart_checklist(issue_key: str) -> str:
     try:
         async with JiraClient.from_settings(get_settings()) as client:
             checklist = await client.get_checklist(issue_key)
+            if checklist is None:
+                # Jira answers 404 alike for a missing property and for an issue it
+                # won't show. In the second case this raises the real error.
+                await client.get_ticket(issue_key)
         if checklist is None:
             return (
-                f"Smart Checklist on {issue_key}: not present "
-                "(plugin not installed, or this ticket doesn't use it)."
+                f"Smart Checklist on {issue_key}: not present (plugin not installed, this "
+                "ticket doesn't use it, or its checklist hasn't been synchronized to the "
+                "issue property after an import or migration)."
             )
-        if not checklist.items:
+        if checklist.is_empty:
             return f"Smart Checklist on {issue_key}: empty (plugin active but no items recorded)."
-        total = len(checklist.items)
-        done = sum(1 for item in checklist.items if item.status == "done")
-        count = f"{total} item{'s' if total != 1 else ''}" if done == 0 else f"{done}/{total} done"
         return (
-            f"# Smart Checklist: {issue_key} ({count})\n\n"
+            f"# Smart Checklist: {issue_key} ({format_checklist_count(checklist)})\n\n"
             f"{render_checklist(checklist, heading_level=2)}\n"
         )
     except* (JiraError, ValidationError) as eg:

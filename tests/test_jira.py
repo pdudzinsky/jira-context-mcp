@@ -240,7 +240,89 @@ class TestPublicApi:
         assert [s.title for s in cl.sections] == ["1. Section", "2. Other"]
         assert [it.name for it in cl.items] == ["alpha", "beta", "gamma"]
 
-    async def test_get_checklist_with_legacy_task_list_preserves_statuses(
+    async def test_get_checklist_reads_statuses_from_the_property_value_alone(
+        self, client_factory, base_url: str
+    ) -> None:
+        """One request is enough: the line markers in the value carry every status."""
+        body = "## 1. Section\n+ done\n- open\n~ working\nx skipped"
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                route = router.get(CHECKLIST_PROPERTY_PATH.format(key="FOO-1")).mock(
+                    return_value=httpx.Response(200, json={"value": body})
+                )
+                cl = await client.get_checklist("FOO-1")
+        assert route.call_count == 1
+        assert cl is not None
+        assert [it.status for it in cl.items] == ["done", "open", "in_progress", "skipped"]
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ({"text": "- item", "version": 2}, '{"text": "- item", "version": 2}'),
+            (["- item"], '["- item"]'),
+            (42, "42"),
+            ({"note": "Größe"}, '{"note": "Größe"}'),
+        ],
+    )
+    async def test_get_checklist_with_non_text_value_keeps_it_visible(
+        self,
+        client_factory,
+        base_url: str,
+        caplog: pytest.LogCaptureFixture,
+        value: Any,
+        expected: str,
+    ) -> None:
+        """An unknown shape must not read as an empty checklist."""
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get(CHECKLIST_PROPERTY_PATH.format(key="FOO-1")).mock(
+                    return_value=httpx.Response(200, json={"value": value})
+                )
+                with caplog.at_level(logging.WARNING, logger="jira_context_mcp.jira"):
+                    cl = await client.get_checklist("FOO-1")
+        assert cl is not None
+        assert not cl.is_empty
+        assert cl.items == []
+        assert [e.text for e in cl.sections[0].entries] == [expected]
+        assert any("FOO-1" in rec.getMessage() for rec in caplog.records)
+
+    async def test_get_checklist_with_null_value_is_empty(
+        self, client_factory, base_url: str
+    ) -> None:
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get(CHECKLIST_PROPERTY_PATH.format(key="FOO-1")).mock(
+                    return_value=httpx.Response(200, json={"value": None})
+                )
+                cl = await client.get_checklist("FOO-1")
+        assert cl is not None
+        assert cl.is_empty
+
+    @pytest.mark.parametrize(
+        ("status", "body", "reason"),
+        [
+            (400, {"json": {"errorMessages": ["bad"]}}, "HTTP 400"),
+            (302, {"headers": {"location": "https://elsewhere.test"}}, "HTTP 302"),
+            (200, {"text": "<html>down</html>"}, "response is not JSON"),
+            (200, {"json": ["- item"]}, "no value in the response"),
+            (200, {"json": 42}, "no value in the response"),
+            (200, {"json": {"key": "x"}}, "no value in the response"),
+        ],
+        ids=["bad-request", "redirect", "not-json", "a-list", "a-number", "no-value"],
+    )
+    async def test_get_checklist_with_unexpected_response_raises(
+        self, client_factory, base_url: str, status: int, body: dict[str, Any], reason: str
+    ) -> None:
+        """A response that holds no property value must not read as an empty checklist."""
+        async with client_factory() as client:
+            with respx.mock(base_url=base_url) as router:
+                router.get(CHECKLIST_PROPERTY_PATH.format(key="FOO-1")).mock(
+                    return_value=httpx.Response(status, **body)
+                )
+                with pytest.raises(JiraError, match=f"checklist property of FOO-1: {reason}"):
+                    await client.get_checklist("FOO-1")
+
+    async def test_get_checklist_with_task_list_preserves_statuses(
         self, client_factory, base_url: str
     ) -> None:
         body = "[x] done one\n[ ] open one\n[-] in progress"

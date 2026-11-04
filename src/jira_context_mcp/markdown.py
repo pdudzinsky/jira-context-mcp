@@ -8,7 +8,7 @@ Three public entry points:
 - :func:`render_ticket_content` — formats a single ticket's full content
   (description + Smart Checklist + attachment list + optional comments);
   used by the ``get_ticket_content`` tool.
-- :func:`render_checklist` / :func:`render_checklist_items` — used both by
+- :func:`render_checklist` / :func:`format_checklist_count` — used both by
   ``render_ticket_content`` and the standalone ``get_smart_checklist`` tool.
 
 All renderers are pure functions of their inputs.
@@ -20,7 +20,7 @@ import re
 from collections import Counter
 from typing import Final
 
-from .models import Attachment, Checklist, ChecklistItem, Comment, Ticket, TreeNode
+from .models import Attachment, Checklist, ChecklistItem, ChecklistText, Comment, Ticket, TreeNode
 
 _STATUS_MARKER: dict[str, str] = {
     "open": "[ ]",
@@ -33,35 +33,80 @@ _STATUS_MARKER: dict[str, str] = {
 # ---------- Smart Checklist (shared by content + standalone tool) ----------
 
 
-def render_checklist_items(items: list[ChecklistItem]) -> str:
-    """Render a flat list of Smart Checklist items as a markdown task list."""
-    return "\n".join(f"- {_STATUS_MARKER[item.status]} {item.name}" for item in items)
+def _render_item(item: ChecklistItem) -> str:
+    head = f"- {_STATUS_MARKER[item.status]}"
+    if item.mandatory:
+        head += " (mandatory)"
+    if item.custom_status:
+        head += f" [{item.custom_status}]"
+    details = (f"  > {detail}".rstrip() for detail in item.details)
+    return "\n".join([f"{head} {item.name}", *details])
+
+
+def _render_entries(entries: list[ChecklistItem | ChecklistText]) -> str:
+    """Render one section's lines in their original order.
+
+    A blank line separates items from text. Without it, markdown would read a
+    text line as a continuation of the list item above.
+    """
+    lines: list[str] = []
+    for index, entry in enumerate(entries):
+        if index and isinstance(entry, ChecklistText) != isinstance(
+            entries[index - 1], ChecklistText
+        ):
+            lines.append("")
+        lines.append(entry.text if isinstance(entry, ChecklistText) else _render_item(entry))
+    return "\n".join(lines)
 
 
 def render_checklist(checklist: Checklist, *, heading_level: int = 2) -> str:
-    """Render a :class:`Checklist` preserving section grouping.
+    """Render a :class:`Checklist` preserving section grouping and nesting.
 
-    Each non-empty section is emitted as a header at ``heading_level``
-    (clamped to ``[1, 6]``) followed by its items as a task list. Empty
-    sections — and an unnamed leading section without items — are skipped.
+    The shallowest header goes at ``heading_level`` (clamped to ``[1, 6]``) and
+    deeper ones keep their distance from it, up to level 6. Every titled section
+    is emitted, even with nothing under it: it can be the parent of the next one
+    or a note in its own right.
     """
-    prefix = "#" * max(1, min(heading_level, 6))
+    base_level = max(1, min(heading_level, 6))
+    top_level = min((s.level for s in checklist.sections if s.title), default=1)
     parts: list[str] = []
     for section in checklist.sections:
-        if not section.items:
-            continue
         if section.title:
-            parts.append(f"{prefix} {section.title}")
-        parts.append(render_checklist_items(section.items))
+            level = min(base_level + section.level - top_level, 6)
+            parts.append(f"{'#' * level} {section.title}")
+        if section.entries:
+            parts.append(_render_entries(section.entries))
     return "\n\n".join(parts)
 
 
-def _format_item_count(items: list[ChecklistItem]) -> str:
+def format_checklist_count(checklist: Checklist) -> str:
+    """Summarise a checklist for its heading, e.g. ``2/5 done, 1 in progress, 1 skipped``.
+
+    Jira's "Smart Checklist Progress" field counts skipped items as completed, so
+    its ``x/y`` is the done plus skipped figures here over the same total. Custom
+    statuses are listed by name for items still marked as to do, in brackets as on
+    their item lines: whether one counts as completed is configured in Jira and
+    isn't in the markdown.
+    """
+    items = checklist.items
     total = len(items)
-    done = sum(1 for item in items if item.status == "done")
-    if done == 0:
-        return f"{total} item{'s' if total != 1 else ''}"
-    return f"{done}/{total} done"
+    if not total and any(section.entries for section in checklist.sections):
+        return "0 items, text only"
+    statuses = Counter(item.status for item in items)
+    parts = [
+        f"{statuses['done']}/{total} done"
+        if statuses["done"]
+        else f"{total} item{'s' if total != 1 else ''}"
+    ]
+    if statuses["in_progress"]:
+        parts.append(f"{statuses['in_progress']} in progress")
+    if statuses["skipped"]:
+        parts.append(f"{statuses['skipped']} skipped")
+    custom_statuses = Counter(
+        item.custom_status for item in items if item.status == "open" and item.custom_status
+    )
+    parts.extend(f"{count} [{name}]" for name, count in custom_statuses.items())
+    return ", ".join(parts)
 
 
 # ---------- Issue tree ----------
@@ -172,10 +217,13 @@ def _format_tree_line(node: TreeNode, *, prefix: str, branch: str, is_root: bool
 # ---------- Single-ticket full content ----------
 
 # The section headings :func:`render_ticket_content` emits. ``heading_offset``
-# moves real ADF headings to level 4 or deeper, so a description line matching
-# this is literal text someone typed, not document structure.
+# moves real ADF headings to level 4 or deeper, and checklist headers start at
+# level 3, so a description or checklist line matching this is literal text
+# someone typed, not document structure. Whitespace covers what a client might
+# strip or skip: ``\s``, plus the BOM that JavaScript's ``trim`` removes too.
 _SECTION_HEADING_RE: Final = re.compile(
-    r"^([ \t]*)(##[ \t]+(?:Description|Smart Checklist|Attachments|Comments)\b)",
+    r"^([\s\ufeff]*)"
+    r"(##[\s\ufeff]+(?:Description|Smart[\s\ufeff]+Checklist|Attachments|Comments)\b)",
     re.IGNORECASE,
 )
 
@@ -190,9 +238,9 @@ def render_ticket_content(
     """Render full content of a single ticket as markdown.
 
     Always shows the header (key, type, summary, status, assignee, URL) and
-    the description block. Smart Checklist appears only when the ticket
-    actually has items; the attachment list only when it has files; comments
-    only when ``include_comments`` is true.
+    the description block. Smart Checklist appears only when the ticket has
+    something in it, items or not; the attachment list only when it has files;
+    comments only when ``include_comments`` is true.
     """
     lines: list[str] = [
         f"# {ticket.key} · [{ticket.issue_type}] {ticket.summary}",
@@ -206,13 +254,12 @@ def render_ticket_content(
         _escape_section_headings(ticket.description_md or "_(no description)_"),
     ]
 
-    if checklist is not None and checklist.items:
-        count = _format_item_count(checklist.items)
+    if checklist is not None and not checklist.is_empty:
         lines.extend(
             [
                 "",
-                f"## Smart Checklist ({count})",
-                render_checklist(checklist, heading_level=3),
+                f"## Smart Checklist ({format_checklist_count(checklist)})",
+                _escape_section_headings(render_checklist(checklist, heading_level=3)),
             ]
         )
 
@@ -225,15 +272,15 @@ def render_ticket_content(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _escape_section_headings(description: str) -> str:
-    """Stop description text from passing for one of this document's own sections.
+def _escape_section_headings(text: str) -> str:
+    """Stop ticket text from passing for one of this document's own sections.
 
     Clients parse this output and anyone who can edit a ticket controls its
-    description, so a literal ``## Attachments`` line could otherwise introduce
-    a forged attachment list. ``splitlines`` covers every line boundary a
-    client might split on.
+    description and checklist, so a literal ``## Attachments`` line could
+    otherwise introduce a forged attachment list. ``splitlines`` covers every
+    line boundary a client might split on.
     """
-    return "\n".join(_SECTION_HEADING_RE.sub(r"\1\\\2", line) for line in description.splitlines())
+    return "\n".join(_SECTION_HEADING_RE.sub(r"\1\\\2", line) for line in text.splitlines())
 
 
 # ---------- Attachments ----------

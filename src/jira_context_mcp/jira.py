@@ -317,7 +317,7 @@ class JiraClient:
             )
         except JiraNotFoundError as e:
             raise JiraNotFoundError(str(e), key=key) from e
-        return self._to_ticket(response.json())
+        return self._to_ticket(_utf8_safe(response.json()))
 
     async def get_checklist(self, key: str) -> Checklist | None:
         """Fetch the Smart Checklist for ``key``, or ``None`` if Jira answers 404.
@@ -339,7 +339,7 @@ class JiraClient:
         if response.status_code != 200:
             raise JiraError(f"checklist property of {key}: HTTP {response.status_code}")
         try:
-            payload = response.json()
+            payload = _utf8_safe(response.json())
         except ValueError as e:
             raise JiraError(f"checklist property of {key}: response is not JSON") from e
         if not isinstance(payload, dict) or "value" not in payload:
@@ -368,7 +368,7 @@ class JiraClient:
             f"/rest/api/3/issue/{key}/comment",
             params={"maxResults": 100},
         )
-        payload = response.json()
+        payload = _utf8_safe(response.json())
         raw_comments = payload.get("comments") or []
         total = payload.get("total")
         if isinstance(total, int) and total > len(raw_comments):
@@ -408,7 +408,7 @@ class JiraClient:
             if next_token:
                 body["nextPageToken"] = next_token
             response = await self._request("POST", "/rest/api/3/search/jql", json=body)
-            data = response.json()
+            data = _utf8_safe(response.json())
             for issue in data.get("issues") or []:
                 ticket = self._to_ticket(issue)
                 if ticket.parent_key in result:
@@ -463,9 +463,8 @@ class JiraClient:
                 continue
             if 500 <= code < 600:
                 if is_last:
-                    raise JiraError(
-                        f"server error {code} after {attempt + 1} attempt(s): {response.text[:200]}"
-                    )
+                    body = _utf8_safe(response.text[:200])
+                    raise JiraError(f"server error {code} after {attempt + 1} attempt(s): {body}")
                 await asyncio.sleep(_compute_backoff(attempt))
                 continue
 
@@ -587,6 +586,28 @@ class JiraClient:
                 return b"".join(chunks), mime_type
         except (httpx.TimeoutException, httpx.NetworkError) as e:
             raise JiraError(f"network error during attachment download: {e}") from e
+
+
+def _utf8_safe(value: Any) -> Any:
+    """Return ``value`` with every string in it encodable as UTF-8.
+
+    JSON can carry a lone surrogate (half of a UTF-16 pair, such as an unpaired
+    ``\\ud83d`` escape). Python's parser keeps it, but UTF-8 can't encode it, and
+    the MCP SDK serializes each reply in the task that writes stdout, so one such
+    character in a tool result ends the whole server.
+
+    Everything read from a Jira response body goes through here, rather than tool
+    results on their way out, because filenames, URLs and keys are used before any
+    result exists. Each surrogate becomes ``?``; a complete pair is one character
+    by this point, so it stays as it is.
+    """
+    if isinstance(value, str):
+        return value.encode("utf-8", "replace").decode("utf-8")
+    if isinstance(value, list):
+        return [_utf8_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {_utf8_safe(key): _utf8_safe(item) for key, item in value.items()}
+    return value
 
 
 def _compute_backoff(attempt: int) -> float:

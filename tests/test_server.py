@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 from typing import Any
 
@@ -908,6 +909,238 @@ class TestGetTicketAttachment:
             out = await get_ticket_attachment(issue_key="FOO-1", attachment_id="12345")
         assert isinstance(out, str)
         assert out.startswith("Error: Jira authentication failed")
+
+
+# ===================================================================
+# Lone surrogates in Jira text
+# ===================================================================
+
+# Half of a UTF-16 pair: a JSON escape can spell it, UTF-8 can't encode it.
+SURROGATE = "\ud83d"
+
+
+def _escaped_json(payload: Any) -> httpx.Response:
+    """A JSON response spelling the surrogate as an escape, the way it reaches the server.
+
+    ``httpx.Response(json=...)`` can't build it: that encodes text as UTF-8 first.
+    """
+    return httpx.Response(200, content=json.dumps(payload))
+
+
+def _adf(text: str) -> dict[str, Any]:
+    paragraph = {"type": "paragraph", "content": [{"type": "text", "text": text}]}
+    return {"type": "doc", "version": 1, "content": [paragraph]}
+
+
+async def _call_and_serialize(tool: str, **arguments: Any) -> Any:
+    """Run ``tool`` through FastMCP and serialize its reply like the stdio writer.
+
+    That serialization is what a surrogate breaks, taking the whole server with it.
+    An in-memory client gets the reply as an object, so it would never notice.
+    """
+    from mcp_types import CallToolResult
+
+    from jira_context_mcp.server import mcp
+
+    result = await mcp.call_tool(tool, arguments)
+    reply = CallToolResult(content=result.content, structured_content=result.structured_content)
+    reply.model_dump_json(by_alias=True, exclude_unset=True).encode("utf-8")
+    return result
+
+
+@pytest.mark.usefixtures("jira_env", "no_sleep")
+class TestLoneSurrogate:
+    """A lone surrogate reads as ``?``, in whichever text it lands."""
+
+    async def test_smart_checklist(self, base_url: str) -> None:
+        value = f"## Sec{SURROGATE}tion\n- bullet {SURROGATE} item\n- [x] done {SURROGATE} item"
+        with respx.mock(base_url=base_url) as router:
+            router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
+                return_value=_escaped_json({"value": value})
+            )
+            result = await _call_and_serialize("get_smart_checklist", issue_key="FOO-1")
+        text = result.content[0].text
+        assert "Sec?tion" in text
+        assert "bullet ? item" in text
+        assert "done ? item" in text
+
+    async def test_ticket_content_fields(self, base_url: str) -> None:
+        attachment = _attachment_payload("1", filename=f"file {SURROGATE}.txt")
+        attachment["author"] = {"displayName": f"uploader {SURROGATE}"}
+        issue = _ticket_payload_with_attachments("FOO-1", [attachment])
+        issue["fields"] |= {
+            "summary": f"summary {SURROGATE}",
+            "status": {"name": f"status {SURROGATE}"},
+            "issuetype": {"name": f"type {SURROGATE}"},
+            "assignee": {"displayName": f"assignee {SURROGATE}"},
+            "description": _adf(f"description {SURROGATE}"),
+        }
+        comment = {
+            "author": {"displayName": f"commenter {SURROGATE}"},
+            "created": "2026-04-22T14:05:00+00:00",
+            "body": _adf(f"comment {SURROGATE}"),
+        }
+        with respx.mock(base_url=base_url) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(return_value=_escaped_json(issue))
+            router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
+                return_value=httpx.Response(404, json={})
+            )
+            router.get("/rest/api/3/issue/FOO-1/comment").mock(
+                return_value=_escaped_json({"comments": [comment], "total": 1})
+            )
+            result = await _call_and_serialize(
+                "get_ticket_content", issue_key="FOO-1", include_comments=True
+            )
+        text = result.content[0].text
+        for field in (
+            "summary",
+            "status",
+            "type",
+            "assignee",
+            "description",
+            "file",
+            "uploader",
+            "commenter",
+            "comment",
+        ):
+            assert f"{field} ?" in text
+
+    async def test_issue_tree(self, base_url: str) -> None:
+        root = _ticket_payload("FOO-1")
+        root["fields"]["summary"] = f"root {SURROGATE}"
+        child = _ticket_payload("FOO-2", parent="FOO-1")
+        child["fields"]["summary"] = f"child {SURROGATE}"
+        with respx.mock(base_url=base_url) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(return_value=_escaped_json(root))
+            router.post("/rest/api/3/search/jql").mock(
+                return_value=_escaped_json({"issues": [child], "isLast": True})
+            )
+            result = await _call_and_serialize("get_issue_tree", issue_key="FOO-1")
+        text = result.content[0].text
+        assert "root ?" in text
+        assert "child ?" in text
+
+    async def test_text_attachment_filename(self, base_url: str) -> None:
+        issue = _ticket_payload_with_attachments(
+            "FOO-1",
+            [_attachment_payload("1", filename=f"log{SURROGATE}.txt", mime_type="text/plain")],
+        )
+        with respx.mock(base_url=base_url) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(return_value=_escaped_json(issue))
+            router.get("/rest/api/3/attachment/content/1").mock(
+                return_value=httpx.Response(200, content=b"body")
+            )
+            result = await _call_and_serialize(
+                "get_ticket_attachment", issue_key="FOO-1", attachment_id="1"
+            )
+        assert result.content[0].text.startswith("# Attachment: log?.txt (text/plain)")
+
+    async def test_pdf_filename(self, base_url: str) -> None:
+        """Building the embedded resource's URI encodes the name, so it must be clean by then."""
+        issue = _ticket_payload_with_attachments(
+            "FOO-1",
+            [
+                _attachment_payload(
+                    "1", filename=f"spec{SURROGATE}.pdf", mime_type="application/pdf"
+                )
+            ],
+        )
+        with respx.mock(base_url=base_url) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(return_value=_escaped_json(issue))
+            router.get("/rest/api/3/attachment/content/1").mock(
+                return_value=httpx.Response(200, content=b"%PDF-1.4...")
+            )
+            result = await _call_and_serialize(
+                "get_ticket_attachment", issue_key="FOO-1", attachment_id="1"
+            )
+        assert result.content[0].resource.uri == "file:///spec%3F.pdf"
+
+    @pytest.mark.parametrize(
+        ("attachment", "expected"),
+        [
+            pytest.param(
+                _attachment_payload("1", mime_type=f"application/x{SURROGATE}"),
+                "unsupported mime type 'application/x?'",
+                id="unsupported-mime",
+            ),
+            pytest.param(
+                _attachment_payload(
+                    "1", size=10**12, base_url=f"https://example.atlassian.net/{SURROGATE}"
+                ),
+                "Download manually from https://example.atlassian.net/?/rest",
+                id="too-large-url",
+            ),
+            pytest.param(
+                _attachment_payload(f"9{SURROGATE}"),
+                "Available ids: 9?.",
+                id="unknown-id",
+            ),
+        ],
+    )
+    async def test_attachment_error_lines(
+        self, base_url: str, attachment: dict[str, Any], expected: str
+    ) -> None:
+        issue = _ticket_payload_with_attachments("FOO-1", [attachment])
+        with respx.mock(base_url=base_url) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(return_value=_escaped_json(issue))
+            result = await _call_and_serialize(
+                "get_ticket_attachment", issue_key="FOO-1", attachment_id="1"
+            )
+        text = result.content[0].text
+        assert text.startswith("Error: ")
+        assert expected in text
+
+    async def test_attachment_url_does_not_fail_the_ticket(self, base_url: str) -> None:
+        """``Attachment.content_url`` has a length constraint, which rejects such text."""
+        issue = _ticket_payload_with_attachments(
+            "FOO-1",
+            [_attachment_payload("1", base_url=f"https://example.atlassian.net/{SURROGATE}")],
+        )
+        with respx.mock(base_url=base_url) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(return_value=_escaped_json(issue))
+            router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
+                return_value=httpx.Response(404, json={})
+            )
+            result = await _call_and_serialize("get_ticket_content", issue_key="FOO-1")
+        text = result.content[0].text
+        assert text.startswith("# FOO-1 ·")
+        assert "design.png" in text
+        # ``?`` opens a query, so the renderer's safe-URL rule leaves the URL out.
+        assert "attachment/content" not in text
+
+    async def test_surrogate_as_raw_bytes(self, base_url: str) -> None:
+        """Python's JSON parser also lets through a surrogate encoded directly, not escaped."""
+        with respx.mock(base_url=base_url) as router:
+            router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
+                return_value=httpx.Response(200, content=b'{"value": "- item \xed\xa0\xbd"}')
+            )
+            result = await _call_and_serialize("get_smart_checklist", issue_key="FOO-1")
+        assert "item ?" in result.content[0].text
+
+    async def test_error_body_in_an_unusual_charset(self, base_url: str) -> None:
+        """The body of a 5xx is decoded as the response says, and some codecs yield surrogates."""
+        response = httpx.Response(
+            500,
+            content=b"boom \\ud83d",
+            headers={"Content-Type": "text/plain; charset=unicode_escape"},
+        )
+        with respx.mock(base_url=base_url) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(return_value=response)
+            result = await _call_and_serialize("get_issue_tree", issue_key="FOO-1")
+        text = result.content[0].text
+        assert text.startswith("Error: Jira request failed")
+        assert "boom ?" in text
+
+    async def test_complete_pair_stays_one_character(self, base_url: str) -> None:
+        issue = _ticket_payload("FOO-1")
+        issue["fields"]["summary"] = "summary 😀"  # ``json.dumps`` spells it as two escapes.
+        with respx.mock(base_url=base_url) as router:
+            router.get("/rest/api/3/issue/FOO-1").mock(return_value=_escaped_json(issue))
+            router.get(CHECKLIST_PATH.format(key="FOO-1")).mock(
+                return_value=httpx.Response(404, json={})
+            )
+            result = await _call_and_serialize("get_ticket_content", issue_key="FOO-1")
+        assert "summary 😀" in result.content[0].text
 
 
 # ===================================================================

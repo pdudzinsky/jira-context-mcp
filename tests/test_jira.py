@@ -16,6 +16,7 @@ from jira_context_mcp.jira import (
     JiraError,
     JiraNotFoundError,
     JiraRateLimitError,
+    _utf8_safe,
 )
 
 CHECKLIST_PROPERTY_PATH = (
@@ -885,3 +886,25 @@ class TestDownloadAttachment:
                 data, _ = await client.download_attachment(self.CONTENT_URL, max_bytes=1024)
         assert data == b"DATA"
         assert "MEDIA-SECRET" not in caplog.text
+
+
+# ===================================================================
+# Text read from Jira
+# ===================================================================
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        pytest.param("a\ud83db", "a?b", id="high-half"),
+        pytest.param("a\ude00b", "a?b", id="low-half"),
+        pytest.param("a😀b", "a😀b", id="complete-pair-untouched"),
+        pytest.param(
+            {"k\ud83d": ["\ud83d", {"n": "\ude00"}], "number": 1, "none": None, "flag": True},
+            {"k?": ["?", {"n": "?"}], "number": 1, "none": None, "flag": True},
+            id="nested-values-and-keys",
+        ),
+    ],
+)
+def test_utf8_safe_replaces_lone_surrogates(raw: Any, expected: Any) -> None:
+    assert _utf8_safe(raw) == expected

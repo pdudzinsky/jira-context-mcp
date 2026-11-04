@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Attachment redirect tokens stay out of logs** — `httpx` logs every request URL at INFO, including the attachment redirect target with its media `token`. Its logger is now capped at WARNING, so a host running at INFO no longer records the token.
 - **Description text can't pass for a section** — a description line imitating `## Description`, `## Smart Checklist`, `## Attachments` or `## Comments` is escaped as `\## …`, so someone who can edit a ticket can't forge a section for a client parsing the output.
 - **Sizes just under 1 MiB** read `1.0 MB` instead of `1024 KB`.
+- **A lone surrogate in Jira text no longer takes the server down** — JSON can spell half of a UTF-16 pair as an escape (`\ud83d`), Python's parser keeps it, and UTF-8 can't encode it. On stdio the MCP SDK then failed to serialize the reply and the process exited: the client saw a timeout, then `Connection closed`, and no tool worked until it restarted, with no `Error:` line to explain why. Every string read from a Jira response now has such characters replaced with `?`, so this holds for every field and all four tools, `Error:` lines included. The same input also failed short of a crash: a PDF with such a filename couldn't be fetched, and such an attachment URL failed the whole ticket as `invalid Jira configuration`. Complete pairs (emoji) are unaffected.
 
 ## [0.2.0] - 2026-05-23
 
